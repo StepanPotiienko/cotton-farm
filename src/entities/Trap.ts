@@ -81,8 +81,8 @@ export abstract class Trap {
 
 export class RakeTrap extends Trap {
   private handle: THREE.Group;
-  private restRotation = 0;
-  private flipRotation = 1.2;
+  private restRotation = Math.PI / 2;
+  private flipRotation = 0;
 
   constructor(events: EventBus<GameEvents>, configEntry: TrapConfig = trapConfigMap.get('rake') ?? config.traps[0] as TrapConfig) {
     super(events, configEntry);
@@ -92,7 +92,7 @@ export class RakeTrap extends Trap {
 
   place(position: THREE.Vector3, rotation = 0): void {
     super.place(position, rotation);
-    this.handle.rotation.x = this.restRotation;
+    this.handle.rotation.x = this.armed ? this.flipRotation : this.restRotation;
   }
 
   update(delta: number): void {
@@ -101,13 +101,20 @@ export class RakeTrap extends Trap {
       const t = Math.min(this.elapsed / Math.max(this.resetSeconds, 0.001), 1);
       // Spring back: fast initial flip up, then settle down over resetSeconds.
       this.handle.rotation.x = THREE.MathUtils.lerp(this.flipRotation, this.restRotation, t * t);
-      if (t >= 1) this.resetArmed();
+      if (t >= 1) {
+        this.resetArmed();
+        this.handle.rotation.x = this.flipRotation;
+      }
     }
   }
 
-  trigger(goblinFSM: GoblinFSM): void {
+  trigger(goblinFSM: GoblinFSM, body?: RAPIER.RigidBody): void {
     if (!this.armed) return;
     this.hitGoblin(goblinFSM);
+    if (body && body.mass && body.mass() > 0) {
+      const direction = new THREE.Vector3(0, 0, 1).applyQuaternion(this.group.quaternion).normalize();
+      body.applyImpulse({ x: direction.x * 3, y: 1.8, z: direction.z * 3 }, true);
+    }
     this.handle.rotation.x = this.flipRotation;
     this.emitTriggered();
   }

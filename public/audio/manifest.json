@@ -1,0 +1,14 @@
+{
+  "tracks": [
+    {
+      "file": "/audio/beautiful-lofi.mp3",
+      "title": "Beautiful Lofi",
+      "format": "audio/mpeg",
+      "durationSeconds": 131.88,
+      "fileSizeBytes": 4220160,
+      "attribution": "Music by Marek Zielinski from Pixabay",
+      "sourceUrl": null,
+      "licenseVerification": "Not verified locally; see CREDITS.md."
+    }
+  ]
+}

@@ -12,11 +12,13 @@ export function setShopSystem(system: ShopSystem): void {
   shopSystem = system;
 }
 
-export function mountHud(root: HTMLElement): void {
+export function mountHud(root: HTMLElement, onMusicToggle?: () => boolean): void {
   rootRef = root;
   root.innerHTML = `
-    <header class="hud-bar"><strong class="brand">${t('title')}</strong><div class="hud-actions"><div class="currency" aria-live="polite"><span class="coin">✿</span><span id="currency-value">0</span><small>${t('currency')}</small></div><button class="hud-button" id="hud-shop" type="button">${t('shop')}</button><button class="hud-button" type="button">${t('settings')}</button></div></header>
+    <header class="hud-bar"><strong class="brand">${t('title')}</strong><div class="hud-actions"><div class="currency" aria-live="polite"><span class="coin">✿</span><span id="currency-value">0</span><small>${t('currency')}</small></div><button class="hud-button" id="hud-music" type="button" aria-pressed="false">${t('music_off')}</button><button class="hud-button" id="hud-shop" type="button">${t('shop')}</button><button class="hud-button" id="hud-settings" type="button">${t('settings')}</button></div></header>
     <div class="hint">${t('hint')}</div>
+    <div class="borshch-meter" aria-live="polite"><strong>${t('borshch')}</strong><progress id="borshch-progress" max="100" value="0"></progress><span id="borshch-status">0%</span><button class="hud-button" id="borshch-sell" type="button" disabled>${t('borshch_ready')}</button></div>
+    <div id="settings-panel" class="settings-panel" style="display:none;"><strong>${t('settings')}</strong><p>${t('settings_credit')}</p><button class="hud-button" id="settings-close" type="button">×</button></div>
     <div id="shop-modal" class="shop-modal" style="display:none;">
       <div class="shop-panel">
         <div class="shop-header"><strong>${t('shop')}</strong><button class="hud-button" id="shop-close" type="button">×</button></div>
@@ -26,9 +28,31 @@ export function mountHud(root: HTMLElement): void {
     </div>
   `;
   const currency = root.querySelector('#currency-value');
-  const update = () => { if (currency) currency.textContent = new Intl.NumberFormat('uk-UA').format(useGameStore.getState().currency); };
+  const progress = root.querySelector('#borshch-progress') as HTMLProgressElement | null;
+  const status = root.querySelector('#borshch-status');
+  const sell = root.querySelector('#borshch-sell') as HTMLButtonElement | null;
+  const update = () => {
+    const state = useGameStore.getState();
+    if (currency) currency.textContent = new Intl.NumberFormat('uk-UA').format(state.currency);
+    const percent = Math.round(state.cookingProgress * 100);
+    if (progress) progress.value = percent;
+    if (status) status.textContent = `${percent}%`;
+    if (sell) sell.disabled = percent < 100;
+  };
   update();
   useGameStore.subscribe(update);
+
+  const musicButton = root.querySelector('#hud-music');
+  musicButton?.addEventListener('click', () => {
+    const enabled = onMusicToggle?.() ?? false;
+    musicButton.textContent = enabled ? t('music_on') : t('music_off');
+    musicButton.setAttribute('aria-pressed', String(enabled));
+  });
+
+  sell?.addEventListener('click', () => { useGameStore.getState().sellBorshch(); update(); });
+  const settingsPanel = root.querySelector('#settings-panel') as HTMLElement | null;
+  root.querySelector('#hud-settings')?.addEventListener('click', () => { if (settingsPanel) settingsPanel.style.display = 'block'; });
+  root.querySelector('#settings-close')?.addEventListener('click', () => { if (settingsPanel) settingsPanel.style.display = 'none'; });
 
   const shopButton = root.querySelector('#hud-shop');
   const modal = root.querySelector('#shop-modal');

@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
 import * as THREE from 'three';
-import { GoblinFSM, GoblinSpawner } from '../entities/Goblin';
+import { GoblinFSM, GoblinSpawner, OrcFSM } from '../entities/Goblin';
 import { RakeTrap, HaystackLauncher, FryingPanTrap, createTrap, type TrapConfig } from '../entities/Trap';
 import { ScoringSystem } from '../systems/ScoringSystem';
 import { ShopSystem } from '../systems/ShopSystem';
@@ -9,12 +9,21 @@ import { useGameStore } from '../state/store';
 import { loadGame, saveGame, validateSave, migrateLegacySave, type LegacySaveData } from './Save';
 import config from '../state/config/game.json';
 import RAPIER from '@dimforge/rapier3d-compat';
+import { getCursorKnockbackImpulse } from './Game';
 
 beforeEach(() => {
   useGameStore.getState().resetStore();
 });
 
 describe('Goblin FSM', () => {
+  it('keeps the cartoon defeat cycle available after a cursor hit', () => {
+    const goblin = new GoblinFSM();
+    goblin.update(1 / 60);
+    goblin.hit();
+    expect(goblin.state).toBe('Dying');
+    goblin.update(config.goblin.dyingSeconds + 0.01, 5, true);
+    expect(goblin.state).toBe('Idle');
+  });
   it('sneaks, grabs, flees, then dies after leaving view', () => {
     const goblin = new GoblinFSM(4);
     goblin.update(1 / 60);
@@ -74,6 +83,29 @@ describe('Goblin FSM', () => {
     goblin.update(config.goblin.stunSeconds + 0.01);
     expect(goblin.state).toBe('Recover');
     expect(goblin.springEnabled).toBe(true);
+  });
+});
+
+describe('cursor knockback', () => {
+  it('pushes the tapped actor away from the cursor and upward', () => {
+    expect(getCursorKnockbackImpulse(new THREE.Vector3(2, 0, 0), new THREE.Vector3(0, 1, 0), 3))
+      .toEqual({ x: 3, y: 1.5, z: 0 });
+  });
+});
+
+describe('startup traps', () => {
+  it('does not configure any trap for automatic startup placement', () => {
+    expect(config.yard.startingTrapIds).toEqual([]);
+  });
+});
+
+describe('Orc FSM', () => {
+  it('shares the gentle trap cycle and can be identified independently', () => {
+    const orc = new OrcFSM();
+    orc.update(1 / 60);
+    expect(orc.state).toBe('Sneak');
+    orc.hit();
+    expect(orc.state).toBe('Dying');
   });
 });
 
