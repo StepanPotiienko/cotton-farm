@@ -1,0 +1,32 @@
+{
+  "physics": { "fixedStep": 0.016666666666666666, "gravity": -9.81, "solverIterations": 4 },
+  "goblin": {
+    "height": 0.95,
+    "radius": 0.27,
+    "speed": 0.42,
+    "speedJitter": 0.35,
+    "grabDistance": 1.15,
+    "grabSeconds": 1.6,
+    "recoverSeconds": 0.35,
+    "fleeSpeedMultiplier": 2.1,
+    "slowSpeedMultiplier": 0.6,
+    "stunSeconds": 1.5,
+    "dyingSeconds": 1.4,
+    "deathSpin": 9.0,
+    "hitImpulse": 3,
+    "uprightSpring": 18,
+    "uprightDamping": 4.5,
+    "pool": { "maxActive": 3, "initialSpawnCount": 1 },
+    "spawn": { "delayMinSeconds": 4, "delayMaxSeconds": 9, "spawnRadius": 3.4, "despawnRadius": 4.35, "fallResetY": -1.2 },
+    "tap": { "tapReward": 5, "maxPickDistance": 1.2 },
+    "visuals": { "starSpinSpeed": 2.8, "starHeight": 1.55 }
+  },
+  "yard": { "size": 8, "floorHalfHeight": 0.31, "potPosition": [0, 0.35, 0.9], "cameraMinDistance": 6, "cameraMaxDistance": 13, "shadowMapSize": 512 },
+  "economy": { "startingCurrency": 0, "earnPerGrab": 3, "earnPerTap": 5 },
+  "combo": { "windowSeconds": 3, "maxCount": 4, "multipliers": [1, 1.5, 2, 3, 4] },
+  "traps": [
+    { "id": "rake", "cost": 25, "nameKey": "trap_rake", "triggerRadius": 0.55, "resetSeconds": 2.5, "reward": 5 },
+    { "id": "haystack", "cost": 150, "nameKey": "trap_haystack", "triggerRadius": 0.6, "resetSeconds": 3.0, "reward": 25, "launchImpulse": { "x": 0, "y": 5, "z": 2 }, "haystackOffset": { "x": 0, "y": 0, "z": 1.2 } },
+    { "id": "pan", "cost": 120, "nameKey": "trap_pan", "triggerRadius": 0.7, "resetSeconds": 2.0, "reward": 15, "swingTime": 0.25, "swingFrom": -0.6, "swingTo": 1.4 }
+  ]
+}
