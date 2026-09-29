@@ -40,6 +40,9 @@ export class GoblinFSM {
   }
 }
 
+/** Orcs use the same gentle slapstick state machine as goblins. */
+export class OrcFSM extends GoblinFSM {}
+
 /** Pure spawn pacing: returns true when a new goblin should enter the yard. */
 export class GoblinSpawner {
   private timer: number;

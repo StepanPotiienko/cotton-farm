@@ -4,7 +4,7 @@ import { EventBus, type GameEvents } from './Events';
 import { Physics } from './Physics';
 import { createRng } from './random';
 import { Renderer } from './Renderer';
-import { GoblinFSM, GoblinSpawner } from '../entities/Goblin';
+import { GoblinFSM, GoblinSpawner, OrcFSM } from '../entities/Goblin';
 import { createTrap, type Trap } from '../entities/Trap';
 import { ScoringSystem } from '../systems/ScoringSystem';
 import { ShopSystem } from '../systems/ShopSystem';
@@ -13,15 +13,24 @@ import { setShopSystem } from '../ui/hud';
 import config from '../state/config/game.json';
 
 interface GoblinActor {
+  kind: 'goblin' | 'orc';
   fsm: GoblinFSM;
   body: RAPIER.RigidBody;
   group: THREE.Group;
   squash: THREE.Group;
   stars: THREE.Group;
+  walkPhase: number;
   speed: number;
 }
 
 interface ActorVisuals { group: THREE.Group; squash: THREE.Group; stars: THREE.Group; body: THREE.Mesh; }
+
+export function getCursorKnockbackImpulse(actorPosition: THREE.Vector3, cursorOrigin: THREE.Vector3, strength: number): { x: number; y: number; z: number } {
+  const away = actorPosition.clone().sub(cursorOrigin).setY(0);
+  if (away.lengthSq() < 0.0001) away.set(0, 0, 1);
+  away.normalize();
+  return { x: away.x * strength, y: strength * 0.5, z: away.z * strength };
+}
 
 export class Game {
   readonly events = new EventBus<GameEvents>();
@@ -39,7 +48,8 @@ export class Game {
   private pointerDown: { x: number; y: number; t: number } | null = null;
   private potTarget = new THREE.Vector3(0, 0, config.yard.potPosition[2]);
   private spawnEdgeZ = -config.goblin.spawn.spawnRadius;
-  private visuals?: { capsule: THREE.CapsuleGeometry; hat: THREE.ConeGeometry; eye: THREE.SphereGeometry; star: THREE.OctahedronGeometry; bodyMat: THREE.MeshToonMaterial; hatMat: THREE.MeshToonMaterial; eyeMat: THREE.MeshToonMaterial; starMat: THREE.MeshToonMaterial };
+  private spawnSequence = 0;
+  private visuals?: { capsule: THREE.CapsuleGeometry; orcBody: THREE.CapsuleGeometry; tusk: THREE.ConeGeometry; eye: THREE.SphereGeometry; star: THREE.OctahedronGeometry; bodyMat: THREE.MeshToonMaterial; orcMat: THREE.MeshToonMaterial; tuskMat: THREE.MeshToonMaterial; eyeMat: THREE.MeshToonMaterial; starMat: THREE.MeshToonMaterial };
   private scoringSystem: ScoringSystem;
   private shopSystem: ShopSystem;
 
@@ -50,7 +60,8 @@ export class Game {
     this.shopSystem = new ShopSystem(this.events);
     setShopSystem(this.shopSystem);
     this.createDiorama();
-    this.placeDefaultTrap();
+    for (const trapId of config.yard.startingTrapIds) this.placeTrap(trapId);
+    this.events.on('shop:purchased', ({ itemId }) => this.placeTrap(itemId));
     this.bindTap();
   }
 
@@ -92,12 +103,14 @@ export class Game {
   };
 
   private stepActors(delta: number): void {
+    useGameStore.getState().cook(delta);
     // Spawning: keeps new goblins entering the yard while pool has room.
     if (this.spawner.update(delta, this.actors.length, config.goblin.pool.maxActive)) this.spawnActor();
     for (let i = this.actors.length - 1; i >= 0; i -= 1) {
       const actor = this.actors[i]!;
       const previousState = actor.fsm.state;
       const toPot = new THREE.Vector3().copy(actor.group.position).setY(0).distanceTo(this.potTarget);
+      if (toPot <= config.borshch.threatRadius && (actor.fsm.state === 'Sneak' || actor.fsm.state === 'Grab')) useGameStore.getState().resetCooking();
       const translation = actor.body.translation();
       const radial = Math.hypot(translation.x, translation.z);
       const gone = radial > config.goblin.spawn.despawnRadius || translation.y < config.goblin.spawn.fallResetY;
@@ -125,26 +138,24 @@ export class Game {
     }
   }
 
-  private placeDefaultTrap(): void {
-    const rake = createTrap('rake', this.events);
-    const potZ = config.yard.potPosition[2];
-    rake.place(new THREE.Vector3(0, 0, potZ + 1.1), Math.PI);
-    this.traps.push(rake);
-    this.renderer.root.add(rake.group);
-
-    const haystack = createTrap('haystack', this.events);
-    haystack.place(new THREE.Vector3(-2.2, 0, 0.4), -Math.PI / 2);
-    this.traps.push(haystack);
-    this.renderer.root.add(haystack.group);
-
-    const pan = createTrap('pan', this.events);
-    pan.place(new THREE.Vector3(2.2, 0, 0.4), Math.PI / 2);
-    this.traps.push(pan);
-    this.renderer.root.add(pan.group);
+  private placeTrap(id: string): void {
+    if (this.traps.some((trap) => trap.id === id)) return;
+    const trap = createTrap(id, this.events);
+    const placements: Record<string, [number, number, number, number]> = {
+      rake: [0, 0, config.yard.potPosition[2] + 1.1, Math.PI],
+      haystack: [-2.2, 0, 0.4, -Math.PI / 2],
+      pan: [2.2, 0, 0.4, Math.PI / 2],
+    };
+    const [x, y, z, rotation] = placements[id] ?? [0, 0, 0, 0];
+    trap.place(new THREE.Vector3(x, y, z), rotation);
+    this.traps.push(trap);
+    this.renderer.root.add(trap.group);
   }
 
-  private spawnActor(): void {
-    const actor = this.freeActors.pop() ?? this.createActor();
+  private spawnActor(kind: 'goblin' | 'orc' = this.spawnSequence++ % 2 === 1 ? 'orc' : 'goblin'): void {
+    const freeIndex = this.freeActors.findIndex((candidate) => candidate.kind === kind);
+    const actor = freeIndex >= 0 ? this.freeActors.splice(freeIndex, 1)[0]! : this.createActor(kind);
+    actor.kind = kind;
     const rng = Math.random.bind(Math);
     // Spawn ON the platform: random point on a ring near the south edge (inside floor radius).
     const angle = rng() * Math.PI * 2;
@@ -156,9 +167,11 @@ export class Game {
     actor.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
     actor.body.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
     actor.fsm.reset('Idle');
-    actor.speed = config.goblin.speed * (1 - config.goblin.speedJitter / 2 + rng() * config.goblin.speedJitter);
+    const tuning = actor.kind === 'orc' ? config.orc : config.goblin;
+    actor.speed = tuning.speed * (1 - tuning.speedJitter / 2 + rng() * tuning.speedJitter);
     actor.group.visible = true;
     actor.stars.visible = false;
+    actor.walkPhase = 0;
     actor.squash.scale.set(1, 1, 1);
     actor.squash.rotation.set(0, 0, 0);
     this.actors.push(actor);
@@ -171,23 +184,28 @@ export class Game {
     actor.group.visible = false; actor.stars.visible = false;
   }
 
-  private createActor(): GoblinActor {
+  private createActor(kind: 'goblin' | 'orc'): GoblinActor {
     if (!this.visuals) this.buildSharedVisuals();
     const visuals = this.visuals!;
+    const isOrc = kind === 'orc';
     const group = new THREE.Group();
     const squash = new THREE.Group();
     group.add(squash);
-    const body = new THREE.Mesh(visuals.capsule, visuals.bodyMat);
-    body.position.y = config.goblin.height / 2;
+    const body = new THREE.Mesh(isOrc ? visuals.orcBody : visuals.capsule, isOrc ? visuals.orcMat : visuals.bodyMat);
+    body.position.y = (isOrc ? config.orc.height : config.goblin.height) / 2;
     body.castShadow = true;
     squash.add(body);
-    const hat = new THREE.Mesh(visuals.hat, visuals.hatMat);
-    hat.position.set(0, config.goblin.height + 0.2, 0);
-    hat.castShadow = true;
-    squash.add(hat);
+    if (isOrc) {
+      for (const tuskX of [-0.11, 0.11]) {
+        const tusk = new THREE.Mesh(visuals.tusk, visuals.tuskMat);
+        tusk.position.set(tuskX, 0.42, 0.25);
+        tusk.rotation.x = Math.PI;
+        squash.add(tusk);
+      }
+    }
     for (const eyeX of [-0.12, 0.12]) {
       const eye = new THREE.Mesh(visuals.eye, visuals.eyeMat);
-      eye.position.set(eyeX, 0.76, 0.22);
+      eye.position.set(eyeX, isOrc ? 0.78 : 0.76, 0.22);
       squash.add(eye);
     }
     const stars = new THREE.Group();
@@ -200,9 +218,9 @@ export class Game {
     stars.visible = false;
     this.renderer.root.add(group, stars);
     this.renderer.scene.userData.addOutlined(body);
-    const fsm = new GoblinFSM(Date.now() % 100000 + this.actors.length * 13, this.events);
+    const fsm = isOrc ? new OrcFSM(Date.now() % 100000 + this.actors.length * 13, this.events) : new GoblinFSM(Date.now() % 100000 + this.actors.length * 13, this.events);
     const rapierBody = this.physics.createGoblinBody({ x: 0, y: config.goblin.height / 2 + 0.05, z: this.spawnEdgeZ });
-    const actor: GoblinActor = { fsm, body: rapierBody, group, squash, stars, speed: config.goblin.speed };
+    const actor: GoblinActor = { kind, fsm, body: rapierBody, group, squash, stars, walkPhase: 0, speed: isOrc ? config.orc.speed : config.goblin.speed };
     this.events.emit('goblin:state', { state: 'spawn' });
     return actor;
   }
@@ -213,11 +231,13 @@ export class Game {
     const g = config.goblin;
     this.visuals = {
       capsule: new THREE.CapsuleGeometry(g.radius, g.height - g.radius * 2, 3, 6),
-      hat: new THREE.ConeGeometry(0.31, 0.47, 5),
+      orcBody: new THREE.CapsuleGeometry(g.radius * 1.08, config.orc.height - g.radius * 2, 3, 6),
+      tusk: new THREE.ConeGeometry(0.045, 0.16, 5),
       eye: new THREE.SphereGeometry(0.045, 5, 4),
       star: new THREE.OctahedronGeometry(0.14),
       bodyMat: this.renderer.toon('#77a85a'),
-      hatMat: this.renderer.toon('#8f5e42'),
+      orcMat: this.renderer.toon(config.orc.color),
+      tuskMat: this.renderer.toon('#f5e3b0'),
       eyeMat: this.renderer.toon('#fff5df'),
       starMat: this.renderer.toon('#ffe98a'),
     };
@@ -250,7 +270,7 @@ export class Game {
     // 'Dying' skips the walking controllers above: free fall keeps its momentum.
     const translation = body.translation();
     const rotation = body.rotation();
-    group.position.set(translation.x, translation.y - 0.8, translation.z);
+    group.position.set(translation.x, translation.y - 0.5, translation.z);
     group.quaternion.set(rotation.x, rotation.y, rotation.z, rotation.w);
     if (state === 'Dying') {
       // Comic death: tumble head over heels, shrink out, dizzy stars.
@@ -259,6 +279,8 @@ export class Game {
       squash.scale.setScalar(Math.max(0.04, k));
       stars.visible = true;
     } else {
+      actor.walkPhase += delta * (state === 'Flee' ? actor.speed * 26 : actor.speed * 20);
+      squash.position.y = (state === 'Sneak' || state === 'Grab' || state === 'Flee') ? Math.abs(Math.sin(actor.walkPhase)) * 0.035 : 0;
       const flop = state === 'Stunned' ? Math.sin(fsm.elapsed * 15) * 0.42 : 0;
       squash.rotation.z = flop;
       const pulse = state === 'Grab' ? 1 + Math.sin(fsm.elapsed * 18) * 0.08 : 1;
@@ -307,16 +329,17 @@ export class Game {
     best.actor.fsm.hit();
     const hitImpulse = config.goblin.hitImpulse;
     if (best.actor.fsm.state === 'Dying') {
-      best.actor.body.applyImpulse(
-        { x: -hitImpulse * 0.4, y: hitImpulse * 0.5, z: -hitImpulse * 0.6 },
-        true,
-      );
+      best.actor.body.applyImpulse(getCursorKnockbackImpulse(best.actor.group.position, this.raycaster.ray.origin, hitImpulse), true);
     }
     this.events.emit('goblin:tap', { reward: config.economy.earnPerTap });
   }
 
   spawnGoblin(): void {
-    this.spawnActor();
+    this.spawnActor('goblin');
+  }
+
+  spawnOrc(): void {
+    this.spawnActor('orc');
   }
 
   killAllGoblins(): number {

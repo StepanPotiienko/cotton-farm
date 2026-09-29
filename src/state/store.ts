@@ -8,7 +8,11 @@ export interface GameState {
   ownedItems: string[];
   unlockedTraps: string[];
   settings: { locale: 'uk' | 'en'; sound: boolean };
+  cookingProgress: number;
   earn(amount: number): void;
+  cook(seconds: number): void;
+  resetCooking(): void;
+  sellBorshch(): boolean;
   spend(amount: number): boolean;
   unlockTrap(id: string): void;
   ownItem(id: string): void;
@@ -21,9 +25,21 @@ export const useGameStore = createStore<GameState>((set, get) => ({
   placed: [],
   ownedItems: [],
   unlockedTraps: [],
+  cookingProgress: 0,
   settings: { locale: 'uk', sound: true },
   earn: (amount) => {
     if (Number.isFinite(amount) && amount >= 0) set({ currency: get().currency + amount });
+  },
+  cook: (seconds) => {
+    if (Number.isFinite(seconds) && seconds > 0 && get().cookingProgress < 1) {
+      set({ cookingProgress: Math.min(1, get().cookingProgress + seconds / config.borshch.cookSeconds) });
+    }
+  },
+  resetCooking: () => set({ cookingProgress: 0 }),
+  sellBorshch: () => {
+    if (get().cookingProgress < 1) return false;
+    set({ cookingProgress: 0, currency: get().currency + config.borshch.saleReward });
+    return true;
   },
   spend: (amount) => {
     if (!Number.isFinite(amount) || amount <= 0 || get().currency < amount) return false;
@@ -42,6 +58,7 @@ export const useGameStore = createStore<GameState>((set, get) => ({
     placed: [],
     ownedItems: [],
     unlockedTraps: [],
+    cookingProgress: 0,
     settings: { locale: 'uk', sound: true },
   }),
 }));
