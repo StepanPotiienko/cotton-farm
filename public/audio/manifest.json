@@ -1,7 +1,7 @@
 {
   "tracks": [
     {
-      "file": "/audio/beautiful-lofi.mp3",
+      "file": "audio/beautiful-lofi.mp3",
       "title": "Beautiful Lofi",
       "format": "audio/mpeg",
       "durationSeconds": 131.88,

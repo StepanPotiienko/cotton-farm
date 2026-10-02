@@ -4,8 +4,9 @@ import { EventBus, type GameEvents } from './Events';
 import { Physics } from './Physics';
 import { createRng } from './random';
 import { Renderer } from './Renderer';
-import { GoblinFSM, GoblinSpawner, OrcFSM } from '../entities/Goblin';
-import { createTrap, type Trap } from '../entities/Trap';
+import { GoblinFSM, GoblinSpawner, OrcFSM, BatFSM } from '../entities/Goblin';
+import { EnemyBase, nearestActiveBase } from '../entities/EnemyBase';
+import { createTrap, getTrapConfig, type Trap } from '../entities/Trap';
 import { ScoringSystem } from '../systems/ScoringSystem';
 import { ShopSystem } from '../systems/ShopSystem';
 import { useGameStore } from '../state/store';
@@ -13,7 +14,7 @@ import { setShopSystem } from '../ui/hud';
 import config from '../state/config/game.json';
 
 interface GoblinActor {
-  kind: 'goblin' | 'orc';
+  kind: 'goblin' | 'orc' | 'bat';
   fsm: GoblinFSM;
   body: RAPIER.RigidBody;
   group: THREE.Group;
@@ -32,6 +33,57 @@ export function getCursorKnockbackImpulse(actorPosition: THREE.Vector3, cursorOr
   return { x: away.x * strength, y: strength * 0.5, z: away.z * strength };
 }
 
+/** Yaw for an actor whose local forward direction is +Z; null leaves non-movement poses alone. */
+export function getActorFacingYaw(state: string, actorX: number, actorZ: number, targetX: number, targetZ: number): number | null {
+  if (state === 'Sneak' || state === 'Grab') {
+    return Math.atan2(targetX - actorX, targetZ - actorZ);
+  }
+  if (state === 'Flee') return 0;
+  return null;
+}
+
+export function canSelectTrapForPlacement(id: string, unlockedIds: string[], placedIds: string[]): boolean {
+  return unlockedIds.includes(id) && !placedIds.includes(id);
+}
+
+export function isValidTrapPlacement(x: number, z: number): boolean {
+  return Number.isFinite(x) && Number.isFinite(z) && Math.hypot(x, z) <= config.yard.size / 2;
+}
+
+export function getFieldTilePositions(): number[] {
+  const { tileCountPerSide, tileSpacing } = config.yard.field;
+  return Array.from({ length: tileCountPerSide * 2 + 1 }, (_, index) => (index - tileCountPerSide) * tileSpacing);
+}
+
+// Round pedestal cylinder geometry: height 0.62 centered at y=-0.34 keeps the
+// visible top face of the platform at y=-0.03 (matching the physics collider top).
+const GROUND_SLAB_HEIGHT = 0.62;
+const GROUND_CENTER_Y = -0.34;
+const GROUND_TOP_Y = GROUND_CENTER_Y + GROUND_SLAB_HEIGHT / 2;
+export const FIELD_TILE_THICKNESS = 0.12;
+
+/** Y of the round pedestal's visible top face; the walkable collider tops sit flush at y=0. */
+export function getGroundTopY(): number {
+  return GROUND_TOP_Y;
+}
+
+/** Y of the cotton tile top faces: tiles rest their bottoms exactly on the pedestal surface. */
+export function getFieldTileTopY(): number {
+  return GROUND_TOP_Y + FIELD_TILE_THICKNESS;
+}
+
+export function canHarvestCotton(growth: number): boolean { return growth >= 1; }
+
+export type EnemyKind = 'goblin' | 'orc';
+export function getEnemyBasePosition(kind: EnemyKind): { x: number; z: number; y: number } {
+  const position = kind === 'goblin' ? config.goblin.spawn.basePosition : config.orc.basePosition;
+  const island = config.islands.find((island) => island.kind === kind);
+  return { x: position[0], z: position[1], y: island ? island.topY : 0 };
+}
+export function getEnemySpawnKind(spawnIndex: number): EnemyKind {
+  return spawnIndex % 2 === 0 ? 'goblin' : 'orc';
+}
+
 export class Game {
   readonly events = new EventBus<GameEvents>();
   readonly renderer: Renderer;
@@ -43,9 +95,17 @@ export class Game {
   actors: GoblinActor[] = [];
   freeActors: GoblinActor[] = [];
   traps: Trap[] = [];
+  private flights: { base: EnemyBase; mesh: THREE.Mesh; origin: THREE.Vector3; elapsed: number }[] = [];
+  private bases: EnemyBase[] = [];
+  private landDecorations = new Map<string, THREE.Group>();
+  private landDecorationsUnsubscribe?: () => void;
   private spawner: GoblinSpawner;
   private raycaster = new THREE.Raycaster();
   private pointerDown: { x: number; y: number; t: number } | null = null;
+  private selectedTrapId: string | null = null;
+  private placementIndicator = new THREE.Group();
+  private placementIndicatorRing?: THREE.Mesh;
+  private placementIndicatorDisc?: THREE.Mesh;
   private potTarget = new THREE.Vector3(0, 0, config.yard.potPosition[2]);
   private spawnEdgeZ = -config.goblin.spawn.spawnRadius;
   private spawnSequence = 0;
@@ -58,10 +118,9 @@ export class Game {
     this.spawner = new GoblinSpawner(createRng(seed + 1));
     this.scoringSystem = new ScoringSystem(this.events, mount.parentElement ?? mount);
     this.shopSystem = new ShopSystem(this.events);
-    setShopSystem(this.shopSystem);
     this.createDiorama();
-    for (const trapId of config.yard.startingTrapIds) this.placeTrap(trapId);
-    this.events.on('shop:purchased', ({ itemId }) => this.placeTrap(itemId));
+    this.createPlacementIndicator();
+    setShopSystem(this.shopSystem, (trapId) => this.selectTrapForPlacement(trapId));
     this.bindTap();
   }
 
@@ -78,8 +137,34 @@ export class Game {
     this.running = false;
     cancelAnimationFrame(this.frame);
     for (const actor of this.actors) this.renderer.root.remove(actor.group, actor.stars);
-    for (const trap of this.traps) this.renderer.root.remove(trap.group);
-    this.traps.forEach((trap) => trap.dispose());
+    for (const base of this.bases) {
+      this.renderer.root.remove(base.group);
+      base.dispose();
+    }
+    this.bases = [];
+    this.landDecorationsUnsubscribe?.();
+    this.landDecorationsUnsubscribe = undefined;
+    for (const [landId, decoration] of this.landDecorations) {
+      this.renderer.root.remove(decoration);
+      decoration.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.geometry.dispose();
+          const materials = Array.isArray(child.material) ? child.material : [child.material];
+          materials.forEach((material) => material.dispose());
+        }
+      });
+      this.landDecorations.delete(landId);
+    }
+    for (const flight of this.flights) {
+      this.renderer.root.remove(flight.mesh);
+      flight.mesh.geometry.dispose();
+      (flight.mesh.material as THREE.Material).dispose();
+    }
+    this.flights = [];
+    for (const trap of this.traps) { this.renderer.root.remove(trap.group); trap.dispose(); }
+    this.traps = [];
+    this.actors = [];
+    this.freeActors = [];
     this.physics?.dispose();
     this.renderer.dispose();
     this.scoringSystem.dispose();
@@ -95,6 +180,8 @@ export class Game {
     while (this.accumulator >= config.physics.fixedStep) {
       this.physics.step();
       this.stepActors(config.physics.fixedStep);
+      this.stepCottonFlights(config.physics.fixedStep);
+      useGameStore.getState().growCotton(config.physics.fixedStep);
       for (const trap of this.traps) trap.update(config.physics.fixedStep);
       this.accumulator -= config.physics.fixedStep;
     }
@@ -130,7 +217,7 @@ export class Game {
   private checkTraps(actor: GoblinActor): void {
     const pos = actor.group.position;
     for (const trap of this.traps) {
-      if (!trap.armed) continue;
+      if (!trap.armed || !trap.accepts(actor.fsm)) continue;
       const distance = pos.distanceTo(trap.group.position);
       if (distance <= trap.triggerRadius) {
         trap.trigger(actor.fsm, actor.body);
@@ -138,36 +225,45 @@ export class Game {
     }
   }
 
-  private placeTrap(id: string): void {
-    if (this.traps.some((trap) => trap.id === id)) return;
+  selectTrapForPlacement(id: string): boolean {
+    if (!canSelectTrapForPlacement(id, useGameStore.getState().unlockedTraps, this.traps.map((trap) => trap.id))) return false;
+    this.selectedTrapId = id;
+    this.placementIndicator.visible = true;
+    return true;
+  }
+  placeSelectedTrapAt(x: number, z: number): boolean {
+    const id = this.selectedTrapId;
+    if (!id || !isValidTrapPlacement(x, z) || !canSelectTrapForPlacement(id, useGameStore.getState().unlockedTraps, this.traps.map((trap) => trap.id))) return false;
     const trap = createTrap(id, this.events);
-    const placements: Record<string, [number, number, number, number]> = {
-      rake: [0, 0, config.yard.potPosition[2] + 1.1, Math.PI],
-      haystack: [-2.2, 0, 0.4, -Math.PI / 2],
-      pan: [2.2, 0, 0.4, Math.PI / 2],
-    };
-    const [x, y, z, rotation] = placements[id] ?? [0, 0, 0, 0];
-    trap.place(new THREE.Vector3(x, y, z), rotation);
-    this.traps.push(trap);
-    this.renderer.root.add(trap.group);
+    trap.place(new THREE.Vector3(x, 0, z));
+    this.traps.push(trap); this.renderer.root.add(trap.group);
+    this.selectedTrapId = null; this.placementIndicator.visible = false;
+    return true;
+  }
+  private createPlacementIndicator(): void {
+    this.placementIndicatorRing = new THREE.Mesh(new THREE.RingGeometry(0.92, 1, 32), new THREE.MeshBasicMaterial({ color: '#74a957' }));
+    this.placementIndicatorRing.rotation.x = -Math.PI / 2;
+    this.placementIndicator.add(this.placementIndicatorRing);
+    this.placementIndicator.visible = false;
+    this.renderer.root.add(this.placementIndicator);
   }
 
-  private spawnActor(kind: 'goblin' | 'orc' = this.spawnSequence++ % 2 === 1 ? 'orc' : 'goblin'): void {
+  private spawnActor(kind: EnemyKind | 'bat' = this.nextSpawnKind()): void {
     const freeIndex = this.freeActors.findIndex((candidate) => candidate.kind === kind);
     const actor = freeIndex >= 0 ? this.freeActors.splice(freeIndex, 1)[0]! : this.createActor(kind);
     actor.kind = kind;
     const rng = Math.random.bind(Math);
-    // Spawn ON the platform: random point on a ring near the south edge (inside floor radius).
-    const angle = rng() * Math.PI * 2;
-    const radius = config.goblin.spawn.spawnRadius * (0.9 + rng() * 0.1);
-    const spawnX = Math.cos(angle) * radius;
-    const spawnZ = Math.sin(angle) * radius;
-    actor.body.setTranslation({ x: spawnX, y: config.goblin.height / 2 + 0.05, z: spawnZ }, true);
+    const position = getEnemyBasePosition(kind === 'bat' ? 'goblin' : kind);
+    const spawnX = position.x + (rng() - 0.5) * 0.22;
+    const spawnZ = position.z + (rng() - 0.5) * 0.22;
+    const height = kind === 'orc' ? config.orc.height : config.goblin.height;
+    actor.body.setGravityScale(kind === 'bat' ? 0 : 1, true);
+    actor.body.setTranslation({ x: spawnX, y: kind === 'bat' ? config.bat.flightHeight : position.y + height / 2 + 0.05, z: spawnZ }, true);
     actor.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
     actor.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
     actor.body.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
     actor.fsm.reset('Idle');
-    const tuning = actor.kind === 'orc' ? config.orc : config.goblin;
+    const tuning = actor.kind === 'bat' ? config.bat : actor.kind === 'orc' ? config.orc : config.goblin;
     actor.speed = tuning.speed * (1 - tuning.speedJitter / 2 + rng() * tuning.speedJitter);
     actor.group.visible = true;
     actor.stars.visible = false;
@@ -184,7 +280,7 @@ export class Game {
     actor.group.visible = false; actor.stars.visible = false;
   }
 
-  private createActor(kind: 'goblin' | 'orc'): GoblinActor {
+  private createActor(kind: EnemyKind | 'bat'): GoblinActor {
     if (!this.visuals) this.buildSharedVisuals();
     const visuals = this.visuals!;
     const isOrc = kind === 'orc';
@@ -195,6 +291,15 @@ export class Game {
     body.position.y = (isOrc ? config.orc.height : config.goblin.height) / 2;
     body.castShadow = true;
     squash.add(body);
+    if (kind === 'bat') {
+      body.material = this.renderer.toon(config.bat.color);
+      body.scale.setScalar(0.6);
+      for (const direction of [-1, 1]) {
+        const wing = new THREE.Mesh(new THREE.ConeGeometry(0.4, 0.8, 3), body.material);
+        wing.name = 'wing'; wing.rotation.z = direction * Math.PI / 2;
+        wing.position.set(direction * 0.5, 0.5, 0); squash.add(wing);
+      }
+    }
     if (isOrc) {
       for (const tuskX of [-0.11, 0.11]) {
         const tusk = new THREE.Mesh(visuals.tusk, visuals.tuskMat);
@@ -218,7 +323,7 @@ export class Game {
     stars.visible = false;
     this.renderer.root.add(group, stars);
     this.renderer.scene.userData.addOutlined(body);
-    const fsm = isOrc ? new OrcFSM(Date.now() % 100000 + this.actors.length * 13, this.events) : new GoblinFSM(Date.now() % 100000 + this.actors.length * 13, this.events);
+    const fsm = kind === 'bat' ? new BatFSM(Date.now(), this.events) : isOrc ? new OrcFSM(Date.now() % 100000 + this.actors.length * 13, this.events) : new GoblinFSM(Date.now() % 100000 + this.actors.length * 13, this.events);
     const rapierBody = this.physics.createGoblinBody({ x: 0, y: config.goblin.height / 2 + 0.05, z: this.spawnEdgeZ });
     const actor: GoblinActor = { kind, fsm, body: rapierBody, group, squash, stars, walkPhase: 0, speed: isOrc ? config.orc.speed : config.goblin.speed };
     this.events.emit('goblin:state', { state: 'spawn' });
@@ -248,6 +353,13 @@ export class Game {
   private updateActor(actor: GoblinActor, delta: number): void {
     const { fsm, body, group, squash, stars } = actor;
     const state = fsm.state;
+    const yaw = getActorFacingYaw(state, group.position.x, group.position.z, this.potTarget.x, this.potTarget.z);
+    if (yaw !== null) squash.rotation.y = yaw;
+    if (actor.kind === 'bat') {
+      body.setGravityScale(state === 'Dying' ? 1 : 0, true);
+      if (state !== 'Dying') body.setLinvel({ ...body.linvel(), y: (config.bat.flightHeight - body.translation().y) * 4 }, true);
+      for (const wing of squash.children.filter((child) => child.name === 'wing')) wing.rotation.x = Math.sin(actor.walkPhase) * 0.6;
+    }
     const linear = body.linvel();
     if (state === 'Sneak' || state === 'Grab') {
       // Constant slow walk toward the pot (no damp-speed chase) with per-goblin pace.
@@ -296,18 +408,26 @@ export class Game {
 
   private bindTap(): void {
     const canvas = this.renderer.renderer.domElement;
+    canvas.style.touchAction = 'none';
+    canvas.addEventListener('pointercancel', () => { this.pointerDown = null; });
+    canvas.addEventListener('lostpointercapture', () => { this.pointerDown = null; });
     canvas.addEventListener('pointerdown', (event) => {
+      if ((event.pointerType === 'mouse' && event.button !== 0) || event.isPrimary === false) return;
       this.pointerDown = { x: event.clientX, y: event.clientY, t: performance.now() };
     });
     canvas.addEventListener('pointerup', (event) => {
       const down = this.pointerDown;
       this.pointerDown = null;
-      if (!down || !this.running) return;
+      if (!down || !this.running || event.isPrimary === false || (event.pointerType === 'mouse' && event.button !== 0)) return;
       const dist = Math.hypot(event.clientX - down.x, event.clientY - down.y);
       if (dist > 8 || performance.now() - down.t > 350) return;
       const rect = canvas.getBoundingClientRect();
       const nx = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       const ny = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
+      this.raycaster.setFromCamera(new THREE.Vector2(nx, ny), this.renderer.camera);
+      const point = this.raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -getFieldTileTopY()), new THREE.Vector3());
+      if (this.selectedTrapId) { if (point) this.placeSelectedTrapAt(point.x, point.z); return; }
+      if (point && Math.abs(point.x) <= config.yard.field.tileSize / 2 && Math.abs(point.z) <= config.yard.field.tileSize / 2 && canHarvestCotton(useGameStore.getState().cottonGrowth)) { this.launchCotton(); return; }
       this.tapGoblin(nx, ny);
     });
   }
@@ -334,6 +454,45 @@ export class Game {
     this.events.emit('goblin:tap', { reward: config.economy.earnPerTap });
   }
 
+  private nextSpawnKind(): EnemyKind | 'bat' {
+    const index = this.spawnSequence++;
+    return (index + 1) % config.bat.spawnEvery === 0 ? 'bat' : getEnemySpawnKind(index);
+  }
+  spawnBat(): void { this.spawnActor('bat'); }
+  launchCotton(): boolean {
+    const base = nearestActiveBase(this.bases, new THREE.Vector3(0, getFieldTileTopY(), 0), useGameStore.getState().attacks);
+    if (!base || !useGameStore.getState().launchCotton(base.id)) return false;
+    this.createCottonFlight(base);
+    this.events.emit('cotton:launched', { baseId: base.id, side: base.side });
+    return true;
+  }
+  private createCottonFlight(base: EnemyBase): void {
+    base.targeted = true;
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 6), this.renderer.toon('#fff5df'));
+    const origin = new THREE.Vector3(0, getFieldTileTopY() + 0.5, 0);
+    mesh.position.copy(origin); this.renderer.root.add(mesh);
+    this.flights.push({ base, mesh, origin, elapsed: 0 });
+  }
+  private stepCottonFlights(delta: number): void {
+    for (let i = this.flights.length - 1; i >= 0; i--) {
+      const flight = this.flights[i]!;
+      flight.elapsed += delta;
+      const t = Math.min(1, flight.elapsed / config.cottonAttack.flightSeconds);
+      flight.mesh.position.lerpVectors(flight.origin, flight.base.group.position, t);
+      flight.mesh.position.y += Math.sin(Math.PI * t) * config.cottonAttack.arcHeight;
+      if (t < 1) continue;
+      if (useGameStore.getState().destroyBase(flight.base.id)) {
+        flight.base.destroy();
+        const next = this.bases.find((base) => base.id === `${flight.base.side}-${Number(flight.base.id.split('-')[1]) + 1}`);
+        if (next) { next.active = true; next.group.visible = true; }
+        this.events.emit('base:destroyed', { baseId: flight.base.id, side: flight.base.side });
+        this.events.emit('land:unlocked', { landId: flight.base.id });
+      }
+      this.renderer.root.remove(flight.mesh); flight.mesh.geometry.dispose();
+      (flight.mesh.material as THREE.Material).dispose(); this.flights.splice(i, 1);
+    }
+  }
+
   spawnGoblin(): void {
     this.spawnActor('goblin');
   }
@@ -354,13 +513,56 @@ export class Game {
 
   private createDiorama(): void {
     const { scene, root } = this.renderer;
-    const ground = new THREE.Mesh(new THREE.CylinderGeometry(config.yard.size / 2, config.yard.size / 2, 0.62, 8), this.renderer.toon('#84a567'));
-    ground.position.y = -0.34;
+    const goblinBasePosition = getEnemyBasePosition('goblin');
+    const orcBasePosition = getEnemyBasePosition('orc');
+    this.bases = [];
+    const progress = useGameStore.getState();
+    for (const side of ['goblin', 'orc'] as const) {
+      const position = side === 'goblin' ? goblinBasePosition : orcBasePosition;
+      for (let index = 1; index <= Math.min(10, config.cottonAttack.maxPerSide); index++) {
+        const base = new EnemyBase(`${side}-${index}`, side === 'goblin' ? '#77a85a' : config.orc.color, position.x, position.z, (color) => this.renderer.toon(color), position.y);
+        base.active = index === 1 || progress.destroyedBases.includes(`${side}-${index - 1}`);
+        if (progress.destroyedBases.includes(base.id)) base.destroy();
+        base.group.visible = base.active && !base.destroyed;
+        this.bases.push(base);
+        root.add(base.group);
+        if (progress.pendingBases.includes(base.id)) this.createCottonFlight(base);
+      }
+    }
+    this.createLandDecorations();
+    const fieldTiles = getFieldTilePositions();
+    const tileGeometry = new THREE.BoxGeometry(config.yard.field.tileSize, FIELD_TILE_THICKNESS, config.yard.field.tileSize);
+    const tileMaterial = this.renderer.toon('#9b704c');
+    const tileCenterY = getFieldTileTopY() - FIELD_TILE_THICKNESS / 2;
+    for (const x of fieldTiles) {
+      const tile = new THREE.Mesh(tileGeometry, tileMaterial);
+      tile.position.set(x, tileCenterY, 0);
+      tile.receiveShadow = true;
+      root.add(tile);
+    }
+    const ground = new THREE.Mesh(new THREE.CylinderGeometry(config.yard.size / 2, config.yard.size / 2, GROUND_SLAB_HEIGHT, 8), this.renderer.toon('#84a567'));
+    ground.position.y = GROUND_CENTER_Y;
     ground.receiveShadow = true;
     root.add(ground);
     const side = new THREE.Mesh(new THREE.CylinderGeometry(config.yard.size / 2, config.yard.size / 2, 0.4, 8, 1, true), this.renderer.toon('#8f6245'));
-    side.position.y = -0.83;
+    side.position.y = GROUND_CENTER_Y - GROUND_SLAB_HEIGHT / 2 - 0.18;
     root.add(side);
+    for (const island of config.islands) {
+      const [x, z] = island.position;
+      const islandHalf = island.height / 2;
+      const slab = new THREE.Mesh(new THREE.CylinderGeometry(island.radius, island.radius, island.height, island.segments), this.renderer.toon('#84a567'));
+      slab.position.set(x, island.topY - islandHalf, z);
+      slab.rotation.y = island.rotation;
+      slab.castShadow = true;
+      slab.receiveShadow = true;
+      root.add(slab);
+      scene.userData.addOutlined(slab);
+      const islandSide = new THREE.Mesh(new THREE.CylinderGeometry(island.radius, island.radius, 0.4, island.segments, 1, true), this.renderer.toon('#8f6245'));
+      islandSide.position.set(x, island.topY - island.height - 0.18, z);
+      islandSide.rotation.y = island.rotation;
+      root.add(islandSide);
+    }
+    this.createCottonGarden();
     const pot = new THREE.Group();
     pot.position.set(config.yard.potPosition[0], config.yard.potPosition[1], config.yard.potPosition[2]);
     const potBody = new THREE.Mesh(new THREE.CylinderGeometry(0.54, 0.43, 0.63, 8), this.renderer.toon('#c75e42'));
@@ -387,5 +589,92 @@ export class Game {
     }
     scene.userData.addOutlined(ground);
     scene.userData.addOutlined(potBody);
+  }
+
+  private createLandDecorations(): void {
+    const purchased = new Set(useGameStore.getState().purchasedLand);
+    const treeMaterial = this.renderer.toon('#4f7f46');
+    const trunkMaterial = this.renderer.toon('#8f6245');
+    const flowerMaterials = [this.renderer.toon('#f6c85f'), this.renderer.toon('#e87979'), this.renderer.toon('#b49ae8')];
+    for (const base of this.bases) {
+      const decoration = new THREE.Group();
+      decoration.name = `decor-${base.id}`;
+      const offsets = [[-0.65, -0.35], [0.55, -0.2], [-0.15, 0.55]] as const;
+      offsets.forEach(([x, z], index) => {
+        const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.05, 0.45, 5), trunkMaterial);
+        stem.position.set(base.group.position.x + x, base.group.position.y + 0.22, base.group.position.z + z);
+        stem.castShadow = true;
+        decoration.add(stem);
+        const crown = new THREE.Mesh(new THREE.SphereGeometry(0.22 + index * 0.03, 6, 5), treeMaterial);
+        crown.position.set(stem.position.x, stem.position.y + 0.28, stem.position.z);
+        crown.castShadow = true;
+        decoration.add(crown);
+      });
+      for (let index = 0; index < 5; index += 1) {
+        const flower = new THREE.Mesh(new THREE.SphereGeometry(0.06, 5, 4), flowerMaterials[index % flowerMaterials.length]);
+        const angle = index * Math.PI * 2 / 5;
+        flower.position.set(base.group.position.x + Math.cos(angle) * 0.9, base.group.position.y + 0.07, base.group.position.z + Math.sin(angle) * 0.9);
+        decoration.add(flower);
+      }
+      decoration.visible = purchased.has(base.id);
+      this.renderer.root.add(decoration);
+      this.landDecorations.set(base.id, decoration);
+    }
+    this.landDecorationsUnsubscribe = useGameStore.subscribe((state) => {
+      const purchased = new Set(state.purchasedLand);
+      for (const [id, decoration] of this.landDecorations) decoration.visible = purchased.has(id);
+    });
+  }
+
+  private createCottonGarden(): void {
+    const root = this.renderer.root;
+    const garden = new THREE.Group();
+    garden.name = 'cotton-garden';
+    const { tileSize } = config.yard.field;
+    const count = 7;
+    const plants: THREE.Group[] = [];
+    const stemMaterial = this.renderer.toon('#578341');
+    const leafMaterial = this.renderer.toon('#79a64d');
+    const cottonMaterial = this.renderer.toon('#fff5db');
+    const cottonGeo = new THREE.SphereGeometry(0.09, 6, 5);
+    for (let i = 0; i < count; i += 1) {
+      const plant = new THREE.Group();
+      const angle = i * Math.PI * 2 / count;
+      plant.position.set(Math.cos(angle) * tileSize * 0.27, getFieldTileTopY(), Math.sin(angle) * tileSize * 0.27);
+      const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.028, 0.28, 5), stemMaterial);
+      stem.position.y = 0.14;
+      plant.add(stem);
+      for (const side of [-1, 1]) {
+        const leaf = new THREE.Mesh(new THREE.SphereGeometry(0.08, 5, 4), leafMaterial);
+        leaf.scale.set(1.3, 0.45, 0.7);
+        leaf.position.set(side * 0.07, 0.12, 0);
+        leaf.castShadow = true;
+        plant.add(leaf);
+      }
+      const boll = new THREE.Group();
+      boll.position.y = 0.29;
+      for (let petal = 0; petal < 3; petal += 1) {
+        const cotton = new THREE.Mesh(cottonGeo, cottonMaterial);
+        const petalAngle = petal * Math.PI * 2 / 3;
+        cotton.position.set(Math.cos(petalAngle) * 0.055, petal % 2 * 0.035, Math.sin(petalAngle) * 0.055);
+        cotton.castShadow = true;
+        boll.add(cotton);
+      }
+      plant.add(boll);
+      plant.userData.boll = boll;
+      plants.push(plant);
+      garden.add(plant);
+    }
+    root.add(garden);
+    const update = () => {
+      const growth = useGameStore.getState().cottonGrowth;
+      for (const plant of plants) {
+        plant.scale.setScalar(0.25 + growth * 0.75);
+        const boll = plant.userData.boll as THREE.Group;
+        boll.visible = growth >= 0.7;
+      }
+    };
+    update();
+    useGameStore.subscribe(update);
   }
 }

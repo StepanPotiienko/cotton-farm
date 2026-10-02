@@ -5,9 +5,8 @@ export class Renderer {
   readonly camera = new THREE.PerspectiveCamera(34, 1, 0.1, 100);
   readonly renderer: THREE.WebGLRenderer;
   readonly root = new THREE.Group();
-  private dragging = false;
-  private lastX = 0;
-  private lastY = 0;
+  private pointers = new Map<number, { x: number; y: number }>();
+  private lastPinchDistance: number | null = null;
   private theta = 0.55;
   private phi = 1.08;
   private distance = 9;
@@ -36,13 +35,35 @@ export class Renderer {
     const resizeObserver = new ResizeObserver(() => this.resize());
     resizeObserver.observe(mount);
     const canvas = this.renderer.domElement;
-    canvas.addEventListener('pointerdown', (event) => { this.dragging = true; this.lastX = event.clientX; this.lastY = event.clientY; canvas.setPointerCapture(event.pointerId); });
-    canvas.addEventListener('pointerup', () => { this.dragging = false; });
+    canvas.addEventListener('pointerdown', (event) => {
+      this.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      canvas.setPointerCapture(event.pointerId);
+      this.lastPinchDistance = this.pointers.size === 2 ? this.pinchDistance() : null;
+    });
+    const releasePointer = (event: PointerEvent) => {
+      this.pointers.delete(event.pointerId);
+      this.lastPinchDistance = this.pointers.size === 2 ? this.pinchDistance() : null;
+    };
+    canvas.addEventListener('pointerup', releasePointer);
+    canvas.addEventListener('pointercancel', releasePointer);
+    canvas.addEventListener('lostpointercapture', releasePointer);
     canvas.addEventListener('pointermove', (event) => {
-      if (!this.dragging) return;
-      this.theta -= (event.clientX - this.lastX) * 0.008;
-      this.phi = THREE.MathUtils.clamp(this.phi + (event.clientY - this.lastY) * 0.006, 0.55, 1.38);
-      this.lastX = event.clientX; this.lastY = event.clientY;
+      const previous = this.pointers.get(event.pointerId);
+      if (!previous) return;
+      const dx = event.clientX - previous.x;
+      const dy = event.clientY - previous.y;
+      this.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (this.pointers.size >= 2) {
+        const distance = this.pinchDistance();
+        if (this.lastPinchDistance !== null && distance > 0) {
+          this.distance = THREE.MathUtils.clamp(this.distance - (distance - this.lastPinchDistance) * 0.012, config.yard.cameraMinDistance, config.yard.cameraMaxDistance);
+          this.updateCamera();
+        }
+        this.lastPinchDistance = distance;
+        return;
+      }
+      this.theta -= dx * 0.008;
+      this.phi = THREE.MathUtils.clamp(this.phi + dy * 0.006, 0.55, 1.38);
       this.updateCamera();
     });
     canvas.addEventListener('wheel', (event) => { this.distance = THREE.MathUtils.clamp(this.distance + event.deltaY * 0.008, config.yard.cameraMinDistance, config.yard.cameraMaxDistance); this.updateCamera(); }, { passive: true });
@@ -58,6 +79,10 @@ export class Renderer {
   private updateCamera(): void {
     this.camera.position.set(this.distance * Math.sin(this.phi) * Math.sin(this.theta), this.distance * Math.cos(this.phi), this.distance * Math.sin(this.phi) * Math.cos(this.theta));
     this.camera.lookAt(0, 0.3, 0);
+  }
+  private pinchDistance(): number {
+    const [first, second] = [...this.pointers.values()];
+    return first && second ? Math.hypot(second.x - first.x, second.y - first.y) : 0;
   }
   private resize(): void {
     const width = Math.max(1, this.mount.clientWidth); const height = Math.max(1, this.mount.clientHeight);

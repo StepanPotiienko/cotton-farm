@@ -46,6 +46,19 @@ export class Physics {
     this.world.createCollider(
       RAPIER.ColliderDesc.cylinder(half, config.yard.size / 2).setTranslation(0, -half, 0),
     );
+    // Each satellite ledge gets its own cylinder collider spanning its visible slab
+    // exactly: top face at island.topY, bottom at island.topY - island.height.
+    for (const island of config.islands) {
+      const islandHalf = island.height / 2;
+      this.world.createCollider(
+        RAPIER.ColliderDesc.cylinder(islandHalf, island.radius)
+          .setTranslation(island.position[0], island.topY - islandHalf, island.position[1]),
+      );
+    }
+    // Rapier 0.14: the scene query pipeline must be refreshed after collider
+    // changes, otherwise static castRay queries miss the freshly added floor
+    // colliders until the first step().
+    this.world.updateSceneQueries();
   }
   dispose(): void { this.world.free(); }
 }
