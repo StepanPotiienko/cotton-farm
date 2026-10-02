@@ -1,9 +1,10 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import config from '../state/config/game.json';
-import { getIslandLayout, getLandSlots, LAND_SIZE } from './LandLayout';
+import { getIslandLayout, getLandSlots, getLandSize } from './LandLayout';
 export class Physics {
   readonly world: RAPIER.World;
   private landColliders = new Map<string, RAPIER.Collider>();
+  private bridgeColliders = new Map<string, RAPIER.Collider>();
   private constructor(world: RAPIER.World) { this.world = world; }
   static async create(): Promise<Physics> {
     await RAPIER.init();
@@ -77,11 +78,31 @@ export class Physics {
       const existing = this.landColliders.get(slot.id);
       if (visible && !existing) {
         const rotation = { x: 0, y: Math.sin(slot.rotation / 2), z: 0, w: Math.cos(slot.rotation / 2) };
-        const collider = this.world.createCollider(RAPIER.ColliderDesc.cuboid(LAND_SIZE / 2, 0.31, LAND_SIZE / 2)
+        const size = getLandSize(index);
+        const collider = this.world.createCollider(RAPIER.ColliderDesc.cuboid(size / 2, 0.31, size / 2)
           .setTranslation(slot.x, slot.y - 0.31, slot.z).setRotation(rotation));
         this.landColliders.set(slot.id, collider);
       } else if (!visible && existing) {
         this.world.removeCollider(existing, true); this.landColliders.delete(slot.id);
+      }
+    }
+    for (const side of ['goblin', 'orc'] as const) {
+      const chain = getLandSlots().filter(slot => slot.side === side);
+      for (let i = 0; i < chain.length; i += 1) {
+        const a = chain[i]!, b = i === 0 ? getIslandLayout(side) : chain[i - 1]!;
+        const key = `${side}-${i}`;
+        const visible = (i === 0 || destroyedBases.includes(chain[i - 1]!.id)) && (i === 0 || destroyedBases.includes(chain[i - 1]!.id));
+        const existing = this.bridgeColliders.get(key);
+        if (!visible && existing) { this.world.removeCollider(existing, true); this.bridgeColliders.delete(key); continue; }
+        if (visible && !existing) {
+          const dx = chain[i]!.x - a.x, dz = chain[i]!.z - a.z;
+          const length = Math.hypot(dx, dz);
+          const rotation = Math.atan2(dx, dz);
+          const collider = this.world.createCollider(RAPIER.ColliderDesc.cuboid(0.22, 0.09, length / 2)
+            .setTranslation((chain[i]!.x + a.x) / 2, chain[i]!.y - 0.09, (chain[i]!.z + a.z) / 2)
+            .setRotation({ x: 0, y: Math.sin(rotation / 2), z: 0, w: Math.cos(rotation / 2) }));
+          this.bridgeColliders.set(key, collider);
+        }
       }
     }
     this.world.updateSceneQueries();

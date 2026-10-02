@@ -20,8 +20,9 @@ useGameStore.subscribe(() => {
 });
 window.addEventListener('pagehide', () => { try { saveGame(); } catch { /* Local storage can be unavailable. */ } });
 const audio = new AudioManager();
-mountHud(hud, () => audio.toggle());
 const game = new Game(app, 1337);
+audio.bindEvents(game.events);
+mountHud(hud, () => audio.toggle(), game.events);
 void game.start();
 declare global { interface Window { __game: Game; __gameControls: GameControls } }
 window.__game = game;

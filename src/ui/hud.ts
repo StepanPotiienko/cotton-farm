@@ -4,6 +4,7 @@ import { getTrapConfig, isTrapUnlocked } from '../entities/Trap';
 import type { ShopSystem } from '../systems/ShopSystem';
 import type { TrapConfig } from '../entities/Trap';
 import config from '../state/config/game.json';
+import type { EventBus, GameEvents } from '../core/Events';
 
 let shopSystem: ShopSystem | null = null;
 let rootRef: HTMLElement | null = null;
@@ -17,16 +18,17 @@ export function setShopSystem(system: ShopSystem, onSelectTrap?: (trapId: string
   selectTrap = onSelectTrap ?? null;
 }
 
-export function mountHud(root: HTMLElement, onMusicToggle?: () => boolean): void {
+export function mountHud(root: HTMLElement, onMusicToggle?: () => boolean, events?: EventBus<GameEvents>): void {
   unsubscribeHud?.();
   rootRef = root;
   root.innerHTML = `
-    <header class="hud-bar"><strong class="brand">${t('title')}</strong><div class="hud-actions"><div class="currency" aria-live="polite"><span class="coin">✿</span><span id="currency-value">0</span><small>${t('currency')}</small></div><button class="hud-button" id="hud-music" type="button" aria-pressed="false">${t('music_off')}</button><button class="hud-button" id="hud-borshch" type="button">${t('borshch')}</button><button class="hud-button" id="hud-shop" type="button">${t('shop')}</button><button class="hud-button" id="hud-settings" type="button">${t('settings')}</button></div></header>
+    <header class="hud-bar"><strong class="brand">${t('title')}</strong><div class="hud-actions"><div class="currency" aria-live="polite"><span class="coin">✿</span><span id="currency-value">0</span><small>${t('currency')}</small></div><button class="hud-button" id="hud-music" type="button" aria-pressed="false">${t('music_off')}</button><button class="hud-button" id="hud-shop" type="button">${t('shop')}</button><button class="hud-button" id="hud-settings" type="button">${t('settings')}</button></div></header>
     <div class="hud-growth">
       <div class="hud-growth-item"><label for="cotton-progress">${t('cotton')}</label><span id="cotton-status">0%</span><span id="cotton-ready" class="hud-ready" aria-hidden="true" hidden>!</span><progress id="cotton-progress" max="100" value="0"></progress><span id="cotton-announcement" class="hud-sr-only" role="status"></span></div>
       <div class="hud-growth-item"><label for="hud-borshch-progress">${t('borshch')}</label><span id="hud-borshch-status">0%</span><span id="hud-borshch-ready" class="hud-ready" aria-hidden="true" hidden>!</span><progress id="hud-borshch-progress" max="100" value="0"></progress><span id="borshch-announcement" class="hud-sr-only" role="status"></span></div>
     </div>
     <div class="hint">${t('hint')} · ${t('camera_help')}</div>
+    <div id="action-feedback" class="action-feedback" role="status" aria-live="polite" hidden></div>
     <div id="borshch-panel" class="borshch-panel" role="dialog" aria-modal="true" aria-labelledby="borshch-title" hidden>
       <div class="borshch-header"><strong id="borshch-title">${t('borshch')}</strong><button class="hud-button" id="borshch-close" type="button" aria-label="${t('borshch')} — close">×</button></div>
       <div class="borshch-body">
@@ -72,11 +74,19 @@ export function mountHud(root: HTMLElement, onMusicToggle?: () => boolean): void
     if (progress) { progress.value = cooking.growth * 100; progress.setAttribute('aria-valuetext', cooking.text); }
     if (status && status.textContent !== cooking.text) status.textContent = cooking.text;
     if (sell) sell.disabled = !cooking.ready;
-    const button = root.querySelector('#hud-borshch');
-    if (button) button.textContent = `${t('borshch')}${cooking.ready ? ' !' : ''}`;
   };
   update();
   unsubscribeHud = useGameStore.subscribe(update);
+  const feedback = root.querySelector('#action-feedback') as HTMLElement | null;
+  const showFeedback = (message: string) => {
+    if (!feedback) return;
+    feedback.textContent = message; feedback.hidden = false;
+    window.setTimeout(() => { if (feedback.textContent === message) feedback.hidden = true; }, 1400);
+  };
+  events?.on('trap:triggered', ({ trapId }) => showFeedback(`${t('trap_triggered')}: ${trapId}`));
+  events?.on('item:moved', ({ itemId }) => showFeedback(`${t('item_moved')}: ${itemId}`));
+  events?.on('borshch:sold', ({ reward }) => showFeedback(`${t('borshch_sold')}: +${reward}`));
+  events?.on('base:destroyed', () => showFeedback(t('base_destroyed')));
 
   const musicButton = root.querySelector('#hud-music');
   musicButton?.addEventListener('click', () => {
@@ -88,9 +98,7 @@ export function mountHud(root: HTMLElement, onMusicToggle?: () => boolean): void
   sell?.addEventListener('click', () => { useGameStore.getState().sellBorshch(); update(); });
 
   const borshchPanel = root.querySelector('#borshch-panel') as HTMLElement | null;
-  const borshchButton = root.querySelector('#hud-borshch');
   const borshchClose = root.querySelector('#borshch-close');
-  borshchButton?.addEventListener('click', () => { if (borshchPanel) borshchPanel.hidden = false; });
   borshchClose?.addEventListener('click', () => { if (borshchPanel) borshchPanel.hidden = true; });
 
   const settingsPanel = root.querySelector('#settings-panel') as HTMLElement | null;
@@ -132,6 +140,7 @@ function injectShopStyles(): void {
   style.id = 'shop-styles';
   style.textContent = `
     .hud-growth { display: flex; flex-wrap: wrap; gap: 10px; padding: 0 clamp(16px, 4vw, 52px); }
+    .action-feedback { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 20; padding: 10px 16px; border: 2px solid #df9842; border-radius: 999px; background: #fff6db; color: #543b29; font-weight: 900; box-shadow: 0 4px 0 #bd8150; pointer-events: none; }
     .hud-growth-item { flex: 0 1 220px; min-width: 0; padding: 8px 12px; border-radius: 14px; background: #fff6db; color: #543b29; font-size: 13px; font-weight: 700; }
     .hud-growth-item label { margin-right: 8px; }
     .hud-ready { margin-left: 6px; color: #543b29; background: #ffe98a; border: 2px solid #df9842; border-radius: 50%; padding: 0 5px; font-weight: 900; }

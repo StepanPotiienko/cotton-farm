@@ -1,3 +1,5 @@
+import type { EventBus, GameEvents } from '../core/Events';
+
 /** Plays the bundled track and keeps a procedural Web Audio fallback. */
 export class AudioManager {
   private context: AudioContext | null = null;
@@ -8,6 +10,19 @@ export class AudioManager {
   private enabled = false;
 
   get isEnabled(): boolean { return this.enabled; }
+
+  bindEvents(events: EventBus<GameEvents>): void {
+    events.on('trap:triggered', () => this.effect('trap'));
+    events.on('item:moved', () => this.effect('move'));
+    events.on('borshch:sold', () => this.effect('sell'));
+    events.on('base:destroyed', () => this.effect('success'));
+  }
+
+  effect(kind: 'trap' | 'move' | 'sell' | 'success'): void {
+    if (!this.enabled || !this.context || !this.master) return;
+    const tones = { trap: 180, move: 320, sell: 520, success: 740 };
+    this.note(tones[kind], this.context.currentTime, 0.16, kind === 'trap' ? 'square' : 'sine', 0.35);
+  }
 
   toggle(): boolean {
     if (this.enabled) {

@@ -4,7 +4,7 @@ import { EventBus, type GameEvents } from './Events';
 import { Physics } from './Physics';
 import { createRng } from './random';
 import { Renderer } from './Renderer';
-import { GoblinFSM, GoblinSpawner, OrcFSM, BatFSM } from '../entities/Goblin';
+import { GoblinFSM, GoblinSpawner, OrcFSM, BatFSM, getDistanceSpeedMultiplier } from '../entities/Goblin';
 import { EnemyBase, nearestActiveBase } from '../entities/EnemyBase';
 import { createTrap, getTrapConfig, type Trap } from '../entities/Trap';
 import { ScoringSystem } from '../systems/ScoringSystem';
@@ -12,7 +12,7 @@ import { ShopSystem } from '../systems/ShopSystem';
 import { decorationLimit, useGameStore } from '../state/store';
 import { setShopSystem } from '../ui/hud';
 import config from '../state/config/game.json';
-import { getLandSlots, getIslandLayout, LAND_SIZE, isOnYard } from './LandLayout';
+import { getLandSlots, getIslandLayout, getLandSize, getLandScale, LAND_SIZE, PLAYER_LAND_SIZE, isOnYard } from './LandLayout';
 
 interface GoblinActor {
   kind: 'goblin' | 'orc' | 'bat';
@@ -103,11 +103,12 @@ export class Game {
   private placedBuildings: THREE.Group[] = [];
   private baseReveals = new Map<EnemyBase, number>();
   private landDecorations = new Map<string, THREE.Group>();
+  private placedVisuals = new Map<number, THREE.Object3D>();
   private landDecorationsUnsubscribe?: () => void;
   private spawner: GoblinSpawner;
   private raycaster = new THREE.Raycaster();
   private pointerDown: { x: number; y: number; t: number } | null = null;
-  private decorationDrag: { pointerId: number; item: THREE.Object3D; landId: string; itemId: string; offset: THREE.Vector3; start: THREE.Vector3; moved: boolean } | null = null;
+  private decorationDrag: { pointerId: number; item: THREE.Object3D; itemIndex: number; landId: string; itemId: string; offset: THREE.Vector3; start: THREE.Vector3; moved: boolean } | null = null;
   private selectedTrapId: string | null = null;
   private placementIndicator = new THREE.Group();
   private placementIndicatorRing?: THREE.Mesh;
@@ -163,6 +164,7 @@ export class Game {
     this.landPlatforms.clear();
     for (const group of this.placedBuildings) { this.renderer.root.remove(group); group.traverse(o => { if (o instanceof THREE.Mesh) { o.geometry.dispose(); (o.material as THREE.Material).dispose(); } }); }
     this.placedBuildings = [];
+    this.placedVisuals.clear();
     this.baseReveals.clear();
     this.decorationDrag = null;
     this.landDecorationsUnsubscribe?.();
@@ -223,8 +225,8 @@ export class Game {
       if (toPot <= config.borshch.threatRadius && (actor.fsm.state === 'Sneak' || actor.fsm.state === 'Grab')) useGameStore.getState().resetCooking();
       const translation = actor.body.translation();
       const radial = Math.hypot(translation.x, translation.z);
-      const gone = radial > config.goblin.spawn.despawnRadius || translation.y < config.goblin.spawn.fallResetY;
-      // Off the platform or into the void: comic death, never a teleport back.
+      const gone = translation.y < config.goblin.spawn.fallResetY;
+      // Bridges connect platforms, so distance from yard is not death.
       if (gone && previousState !== 'Dying') actor.fsm.transition('Dying');
       // Trap collision check for live Sneak/Grab goblins.
       if (actor.fsm.state === 'Sneak' || actor.fsm.state === 'Grab') {
@@ -270,6 +272,7 @@ export class Game {
     this.renderPlacedItem(useGameStore.getState().placed.at(-1)!); return true;
   }
   private renderPlacedItem(entry: ReturnType<typeof useGameStore.getState>['placed'][number]): void {
+    const entryIndex = useGameStore.getState().placed.indexOf(entry);
     if (getTrapConfig(entry.itemId)) {
       const trap = createTrap(entry.itemId, this.events);
       const slot = getLandSlots().find(s => s.id === entry.landId);
@@ -278,7 +281,7 @@ export class Game {
         for (const child of trap.group.children) { child.position.x -= center.x; child.position.z -= center.z; }
       }
       trap.place(new THREE.Vector3(...entry.position), slot?.rotation ?? 0);
-      this.traps.push(trap); this.renderer.root.add(trap.group); return;
+      this.traps.push(trap); this.placedVisuals?.set(entryIndex, trap.group); this.renderer.root.add(trap.group); return;
     }
     if (entry.itemId !== 'fence' && entry.itemId !== 'decor-tree') return;
     const group = new THREE.Group(); group.position.set(...entry.position);
@@ -289,7 +292,7 @@ export class Game {
       for (const x of [-0.45,0.45]) add(new THREE.BoxGeometry(0.08,0.65,0.08),x,0.325);
       for (const y of [0.2,0.48]) add(new THREE.BoxGeometry(1,0.08,0.06),0,y);
     } else { add(new THREE.CylinderGeometry(0.04,0.06,0.45,5),0,0.225); add(new THREE.ConeGeometry(0.28,0.55,6),0,0.58); }
-    this.placedBuildings.push(group); this.renderer.root.add(group);
+    this.placedBuildings.push(group); this.placedVisuals?.set(entryIndex, group); this.renderer.root.add(group);
   }
   private createPlacementIndicator(): void {
     this.placementIndicatorRing = new THREE.Mesh(new THREE.RingGeometry(0.92, 1, 32), new THREE.MeshBasicMaterial({ color: '#74a957' }));
@@ -304,9 +307,14 @@ export class Game {
     const actor = freeIndex >= 0 ? this.freeActors.splice(freeIndex, 1)[0]! : this.createActor(kind);
     actor.kind = kind;
     const rng = Math.random.bind(Math);
-    const position = getEnemyBasePosition(kind === 'bat' ? 'goblin' : kind);
-    const spawnX = position.x + (rng() - 0.5) * 0.22;
-    const spawnZ = position.z + (rng() - 0.5) * 0.22;
+    const side = kind === 'bat' ? 'goblin' : kind;
+    const oldPlatforms = useGameStore.getState().destroyedBases.filter(id => id.startsWith(`${side}-`));
+    const spawnId = oldPlatforms.length ? oldPlatforms[Math.floor(rng() * oldPlatforms.length)]! : undefined;
+    const spawnSlot = spawnId ? getLandSlots().find(slot => slot.id === spawnId) : undefined;
+    const position = spawnSlot ? { x: spawnSlot.x, z: spawnSlot.z, y: spawnSlot.y } : getEnemyBasePosition(side);
+    const spawnSpread = spawnSlot ? PLAYER_LAND_SIZE * 0.35 : 0.22;
+    const spawnX = position.x + (rng() - 0.5) * spawnSpread;
+    const spawnZ = position.z + (rng() - 0.5) * spawnSpread;
     const height = kind === 'orc' ? config.orc.height : config.goblin.height;
     actor.body.setGravityScale(kind === 'bat' ? 0 : 1, true);
     actor.body.setTranslation({ x: spawnX, y: kind === 'bat' ? config.bat.flightHeight : position.y + height / 2 + 0.05, z: spawnZ }, true);
@@ -408,7 +416,8 @@ export class Game {
       const dirX = this.potTarget.x - group.position.x;
       const dirZ = this.potTarget.z - group.position.z;
       const length = Math.hypot(dirX, dirZ) || 1;
-      body.setLinvel({ x: (dirX / length) * actor.speed, y: linear.y, z: (dirZ / length) * actor.speed }, true);
+      const distanceSpeed = getDistanceSpeedMultiplier(Math.hypot(dirX, dirZ));
+      body.setLinvel({ x: (dirX / length) * actor.speed * distanceSpeed, y: linear.y, z: (dirZ / length) * actor.speed * distanceSpeed }, true);
       group.rotation.y = Math.PI;
     } else if (state === 'Flee') {
       body.setLinvel({ x: 0, y: linear.y, z: -actor.speed * config.goblin.fleeSpeedMultiplier }, true);
@@ -477,12 +486,25 @@ export class Game {
         while (item.parent && item.parent !== tile) item = item.parent;
         const point = this.decorationPoint(tile);
         if (!point) continue;
-        this.decorationDrag = { pointerId: event.pointerId, item, landId, itemId: item.name,
+        this.decorationDrag = { pointerId: event.pointerId, item, itemIndex: -1, landId, itemId: item.name,
           offset: item.position.clone().sub(point), start: item.position.clone(), moved: false };
         canvas.setPointerCapture?.(event.pointerId);
         event.preventDefault();
         event.stopImmediatePropagation();
         break;
+      }
+      if (!this.decorationDrag && this.placedVisuals) {
+        for (const [itemIndex, visual] of this.placedVisuals) {
+          visual.updateWorldMatrix(true, true);
+          if (!this.raycaster.intersectObject(visual, true)[0]) continue;
+          const entry = useGameStore.getState().placed[itemIndex];
+          if (!entry) continue;
+          const point = this.raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -visual.position.y), new THREE.Vector3());
+          if (!point) continue;
+          this.decorationDrag = { pointerId: event.pointerId, item: visual, itemIndex, landId: entry.landId ?? '', itemId: entry.itemId,
+            offset: visual.position.clone().sub(point), start: visual.position.clone(), moved: false };
+          canvas.setPointerCapture?.(event.pointerId); event.preventDefault(); event.stopImmediatePropagation(); break;
+        }
       }
     }, true);
     canvas.addEventListener('pointermove', (event) => {
@@ -490,16 +512,23 @@ export class Game {
       if (!drag) return;
       event.stopImmediatePropagation();
       if (!down || drag.pointerId !== event.pointerId) return;
-      if (!useGameStore.getState().purchasedLand.includes(drag.landId)) { cancel(event); return; }
+      if (drag.itemIndex < 0 && !useGameStore.getState().purchasedLand.includes(drag.landId)) { cancel(event); return; }
       if (Math.hypot(event.clientX - down.x, event.clientY - down.y) > 8) drag.moved = true;
       if (!drag.moved) return;
       this.setPointerRay(event);
-      const point = this.decorationPoint(drag.item.parent!);
+      const point = drag.itemIndex >= 0
+        ? this.raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -drag.item.position.y), new THREE.Vector3())
+        : this.decorationPoint(drag.item.parent!);
       if (!point) return;
       point.add(drag.offset);
-      const limit = decorationLimit(drag.itemId)!;
-      drag.item.position.x = THREE.MathUtils.clamp(point.x, -limit, limit);
-      drag.item.position.z = THREE.MathUtils.clamp(point.z, -limit, limit);
+      if (drag.itemIndex >= 0) {
+        drag.item.position.x = point.x + drag.offset.x;
+        drag.item.position.z = point.z + drag.offset.z;
+      } else {
+        const limit = decorationLimit(drag.itemId)!;
+        drag.item.position.x = THREE.MathUtils.clamp(point.x + drag.offset.x, -limit, limit);
+        drag.item.position.z = THREE.MathUtils.clamp(point.z + drag.offset.z, -limit, limit);
+      }
       event.preventDefault();
     }, true);
     canvas.addEventListener('pointerup', (event) => {
@@ -509,7 +538,11 @@ export class Game {
         if (drag.pointerId !== event.pointerId) return;
         this.decorationDrag = null;
         this.pointerDown = null;
-        if (drag.moved && !useGameStore.getState().moveDecoration(drag.landId, drag.itemId, drag.item.position.x, drag.item.position.z)) drag.item.position.copy(drag.start);
+        const moved = drag.itemIndex >= 0
+          ? useGameStore.getState().moveItem(drag.itemIndex, drag.item.position.x, drag.item.position.z)
+          : useGameStore.getState().moveDecoration(drag.landId, drag.itemId, drag.item.position.x, drag.item.position.z);
+        if (drag.moved && !moved) drag.item.position.copy(drag.start);
+        if (drag.moved && moved) this.events?.emit('item:moved', { itemId: drag.itemId });
         if (canvas.hasPointerCapture?.(event.pointerId)) canvas.releasePointerCapture?.(event.pointerId);
         event.preventDefault();
         return;
@@ -523,11 +556,20 @@ export class Game {
       const nx = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       const ny = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
       this.raycaster.setFromCamera(new THREE.Vector2(nx, ny), this.renderer.camera);
+      const pot = this.renderer.root.getObjectByName('borshch-pot');
+      if (pot && this.raycaster.intersectObject(pot, true).length > 0) {
+        const sold = useGameStore.getState().sellBorshch();
+        if (sold) this.events.emit('borshch:sold', { reward: config.borshch.saleReward });
+        return;
+      }
       const point = this.raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -getFieldTileTopY()), new THREE.Vector3());
       if (this.selectedTrapId) {
         const surfaces = [...this.landPlatforms.values()].filter(mesh => mesh.visible);
         const hit = this.raycaster.intersectObjects(surfaces, false)[0];
-        if (hit) this.placeSelectedTrapAt(hit.point.x, hit.point.z);
+        if (hit) {
+          const slot = getLandSlots().find(candidate => `land-${candidate.id}` === hit.object.name);
+          this.placeSelectedTrapAt(slot?.x ?? hit.point.x, slot?.z ?? hit.point.z);
+        }
         else { const ground = this.raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0,1,0), 0), new THREE.Vector3()); if (ground) this.placeSelectedTrapAt(ground.x, ground.z); }
         return;
       }
@@ -658,7 +700,7 @@ export class Game {
     this.createLandPlatforms();
     this.createLandDecorations();
     for (const entry of progress.placed) this.renderPlacedItem(entry);
-    const fieldTiles = getFieldTilePositions();
+    const fieldTiles = [0];
     const tileGeometry = new THREE.BoxGeometry(config.yard.field.tileSize, FIELD_TILE_THICKNESS, config.yard.field.tileSize);
     const tileMaterial = this.renderer.toon('#9b704c');
     const tileCenterY = getFieldTileTopY() - FIELD_TILE_THICKNESS / 2;
@@ -694,6 +736,7 @@ export class Game {
     }
     this.createCottonGarden();
     const pot = new THREE.Group();
+    pot.name = 'borshch-pot';
     pot.position.set(config.yard.potPosition[0], config.yard.potPosition[1], config.yard.potPosition[2]);
     const potBody = new THREE.Mesh(new THREE.CylinderGeometry(0.54, 0.43, 0.63, 8), this.renderer.toon('#c75e42'));
     potBody.castShadow = true;
@@ -723,7 +766,8 @@ export class Game {
 
   private createLandPlatforms(): void {
     for (const slot of getLandSlots()) {
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(LAND_SIZE, 0.62, LAND_SIZE), this.renderer.toon('#80644b'));
+      const size = getLandSize(Number(slot.id.split('-')[1]));
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(size, 0.62, size), this.renderer.toon('#80644b'));
       mesh.name = `land-${slot.id}`; mesh.position.set(slot.x, slot.y - 0.31, slot.z); mesh.rotation.y = slot.rotation;
       mesh.receiveShadow = true; mesh.visible = useGameStore.getState().destroyedBases.includes(slot.id);
       this.landPlatforms.set(slot.id, mesh); this.renderer.root.add(mesh);
@@ -740,6 +784,21 @@ export class Game {
     };
     update();
     this.landPlatformsUnsubscribe = useGameStore.subscribe(update);
+    for (const side of ['goblin', 'orc'] as const) {
+      const chain = getLandSlots().filter(slot => slot.side === side);
+      for (let i = 0; i < chain.length; i += 1) {
+        const a = i === 0 ? getIslandLayout(side) : chain[i - 1]!;
+        const b = chain[i]!;
+        const bridge = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.18, Math.hypot(b.x - a.x, b.z - a.z)), this.renderer.toon('#a9794f'));
+        bridge.name = `bridge-${side}-${i}`;
+        bridge.position.set((a.x + b.x) / 2, b.y - 0.09, (a.z + b.z) / 2);
+        bridge.rotation.y = Math.atan2(b.x - a.x, b.z - a.z);
+        this.renderer.root.add(bridge);
+        const previousId = 'id' in a ? a.id : undefined;
+        const updateBridge = () => { bridge.visible = i === 0 ? true : !!previousId && useGameStore.getState().destroyedBases.includes(previousId); };
+        updateBridge(); useGameStore.subscribe(updateBridge);
+      }
+    }
   }
 
   private createLandDecorations(): void {

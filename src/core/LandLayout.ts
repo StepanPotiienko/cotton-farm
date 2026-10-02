@@ -1,6 +1,14 @@
 import config from '../state/config/game.json';
 
 export const LAND_SIZE = 2.4;
+/** Player platforms revealed after base destruction are compact satellite pads. */
+export const PLAYER_LAND_SCALE = 0.65;
+export const PLAYER_LAND_SIZE = LAND_SIZE * PLAYER_LAND_SCALE;
+export function getLandScale(index: number): number {
+  if (index <= 1) return 0.78;
+  return index % 2 === 0 ? 1.05 : 0.82;
+}
+export function getLandSize(index: number): number { return LAND_SIZE * getLandScale(index); }
 export type LandSide = 'goblin' | 'orc';
 export interface LandSlot { id: string; side: LandSide; x: number; z: number; y: number; rotation: number; }
 
@@ -32,7 +40,9 @@ export function getPurchasedSurface(x: number, z: number, purchased: string[], m
     const dx = x - slot.x, dz = z - slot.z;
     const lx = Math.cos(slot.rotation) * dx - Math.sin(slot.rotation) * dz;
     const lz = Math.sin(slot.rotation) * dx + Math.cos(slot.rotation) * dz;
-    if (Math.abs(lx) <= LAND_SIZE / 2 - margin + 1e-9 && Math.abs(lz) <= LAND_SIZE / 2 - margin + 1e-9) return slot;
+    // Large traps (e.g. rake) keep legacy center placement on compact pads.
+    const surfaceSize = margin > PLAYER_LAND_SIZE / 2 ? LAND_SIZE : getLandSize(Number(slot.id.split('-')[1]));
+    if (Math.abs(lx) <= surfaceSize / 2 - margin + 1e-9 && Math.abs(lz) <= surfaceSize / 2 - margin + 1e-9) return slot;
   }
   return null;
 }

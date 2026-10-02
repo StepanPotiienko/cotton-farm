@@ -31,6 +31,7 @@ export function decorationLimit(itemId: string): number | null {
 export interface GameState extends AttackProgress {
   decorationPositions: DecorationPosition[];
   moveDecoration(landId: string, itemId: string, x: number, z: number): boolean;
+  moveItem(index: number, x: number, z: number): boolean;
   currency: number;
   inventory: string[];
   placed: { itemId: string; position: [number, number, number]; landId?: string }[];
@@ -77,6 +78,18 @@ export const useGameStore = createStore<GameState>((set, get) => ({
     const slot = getPurchasedSurface(x, z, state.purchasedLand, margin);
     if (!slot && (!trap || !isOnYard(x, z, margin))) return false;
     set({ placed: [...state.placed, { itemId, position: [x, slot?.y ?? 0, z], ...(slot ? { landId: slot.id } : {}) }] });
+    return true;
+  },
+  moveItem: (index, x, z) => {
+    const state = get(), entry = state.placed[index], margin = entry ? itemMargin(entry.itemId) : null;
+    if (!entry || margin === null || !Number.isFinite(x) || !Number.isFinite(z)) return false;
+    const trap = config.traps.some(t => t.id === entry.itemId);
+    const slot = getPurchasedSurface(x, z, state.purchasedLand, margin);
+    if (!slot && (!trap || !isOnYard(x, z, margin))) return false;
+    const placed = state.placed.map((item, itemIndex) => itemIndex === index
+      ? { ...item, position: [x, slot?.y ?? 0, z] as [number, number, number], ...(slot ? { landId: slot.id } : { landId: undefined }) }
+      : item);
+    set({ placed });
     return true;
   },
   moveDecoration: (landId, itemId, x, z) => {
