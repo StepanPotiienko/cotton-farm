@@ -1,4 +1,8 @@
 export interface GameEvents {
+  'cotton:launched': { baseId: string; side: 'goblin' | 'orc' };
+  'base:destroyed': { baseId: string; side: 'goblin' | 'orc' };
+  'land:unlocked': { landId: string };
+
   'currency:changed': { amount: number };
   'goblin:state': { state: string };
   'goblin:grabbed': undefined;

@@ -55,6 +55,8 @@ export abstract class Trap {
 
   abstract trigger(goblinFSM: GoblinFSM, body?: RAPIER.RigidBody): void;
 
+  accepts(fsm: GoblinFSM): boolean { return !fsm.airborne; }
+
   hitGoblin(goblinFSM: GoblinFSM): void {
     if (this.armed && (goblinFSM.state === 'Sneak' || goblinFSM.state === 'Grab')) {
       goblinFSM.hit();
@@ -81,8 +83,8 @@ export abstract class Trap {
 
 export class RakeTrap extends Trap {
   private handle: THREE.Group;
-  private restRotation = Math.PI / 2;
-  private flipRotation = 0;
+  private restRotation = 0;
+  private flipRotation = Math.PI / 2;
 
   constructor(events: EventBus<GameEvents>, configEntry: TrapConfig = trapConfigMap.get('rake') ?? config.traps[0] as TrapConfig) {
     super(events, configEntry);
@@ -92,7 +94,7 @@ export class RakeTrap extends Trap {
 
   place(position: THREE.Vector3, rotation = 0): void {
     super.place(position, rotation);
-    this.handle.rotation.x = this.armed ? this.flipRotation : this.restRotation;
+    this.handle.rotation.x = this.armed ? this.restRotation : this.flipRotation;
   }
 
   update(delta: number): void {
@@ -103,13 +105,13 @@ export class RakeTrap extends Trap {
       this.handle.rotation.x = THREE.MathUtils.lerp(this.flipRotation, this.restRotation, t * t);
       if (t >= 1) {
         this.resetArmed();
-        this.handle.rotation.x = this.flipRotation;
+        this.handle.rotation.x = this.restRotation;
       }
     }
   }
 
   trigger(goblinFSM: GoblinFSM, body?: RAPIER.RigidBody): void {
-    if (!this.armed) return;
+    if (!this.armed || !this.accepts(goblinFSM) || (goblinFSM.state !== 'Idle' && goblinFSM.state !== 'Sneak' && goblinFSM.state !== 'Grab')) return;
     this.hitGoblin(goblinFSM);
     if (body && body.mass && body.mass() > 0) {
       const direction = new THREE.Vector3(0, 0, 1).applyQuaternion(this.group.quaternion).normalize();
@@ -182,7 +184,7 @@ export class HaystackLauncher extends Trap {
   }
 
   trigger(goblinFSM: GoblinFSM, body?: RAPIER.RigidBody): void {
-    if (!this.armed) return;
+    if (!this.armed || !this.accepts(goblinFSM) || (goblinFSM.state !== 'Sneak' && goblinFSM.state !== 'Grab')) return;
     this.hitGoblin(goblinFSM);
     if (body && body.mass && body.mass() > 0) {
       body.applyImpulse(this.launch, true);
@@ -277,7 +279,7 @@ export class FryingPanTrap extends Trap {
   }
 
   trigger(goblinFSM: GoblinFSM, body?: RAPIER.RigidBody): void {
-    if (!this.armed) return;
+    if (!this.armed || !this.accepts(goblinFSM) || (goblinFSM.state !== 'Sneak' && goblinFSM.state !== 'Grab')) return;
     this.hitGoblin(goblinFSM);
     this.swinging = true;
     this.swingElapsed = 0;
@@ -322,10 +324,39 @@ export class FryingPanTrap extends Trap {
   }
 }
 
+export class AirDefenceTrap extends Trap {
+  private readonly radar: THREE.Mesh;
+  constructor(events: EventBus<GameEvents>, entry: TrapConfig = trapConfigMap.get('air-defence')!) {
+    super(events, entry);
+    const material = new THREE.MeshToonMaterial({ color: '#75b4cf' });
+    const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.15, 1.1, 6), material);
+    mast.position.y = 0.55;
+    this.radar = new THREE.Mesh(new THREE.TorusGeometry(0.35, 0.07, 6, 12), material);
+    this.radar.position.y = 1.2;
+    this.group.add(mast, this.radar);
+  }
+  override accepts(fsm: GoblinFSM): boolean { return fsm.airborne; }
+  trigger(fsm: GoblinFSM): void {
+    if (!this.armed || !this.accepts(fsm) || (fsm.state !== 'Sneak' && fsm.state !== 'Grab')) return;
+    this.hitGoblin(fsm);
+    this.radar.scale.setScalar(1.6);
+    this.emitTriggered();
+  }
+  update(delta: number): void {
+    this.radar.rotation.y += delta * 3;
+    if (!this.armed) {
+      this.elapsed += delta;
+      this.radar.scale.setScalar(1 + 0.6 * Math.max(0, 1 - this.elapsed / this.resetSeconds));
+      if (this.elapsed >= this.resetSeconds) this.resetArmed();
+    }
+  }
+}
+
 export function createTrap(id: string, events: EventBus<GameEvents>): Trap {
   const cfg = trapConfigMap.get(id);
   if (!cfg) throw new Error(`Unknown trap id: ${id}`);
   switch (id) {
+    case 'air-defence': return new AirDefenceTrap(events, cfg);
     case 'rake': return new RakeTrap(events, cfg);
     case 'haystack': return new HaystackLauncher(events, cfg);
     case 'pan': return new FryingPanTrap(events, cfg);

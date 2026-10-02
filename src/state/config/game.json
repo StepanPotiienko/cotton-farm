@@ -1,5 +1,9 @@
 {
-  "physics": { "fixedStep": 0.016666666666666666, "gravity": -9.81, "solverIterations": 4 },
+  "physics": {
+    "fixedStep": 0.016666666666666666,
+    "gravity": -9.81,
+    "solverIterations": 4
+  },
   "goblin": {
     "height": 0.95,
     "radius": 0.27,
@@ -16,24 +20,165 @@
     "hitImpulse": 3,
     "uprightSpring": 18,
     "uprightDamping": 4.5,
-    "pool": { "maxActive": 3, "initialSpawnCount": 1 },
-    "spawn": { "delayMinSeconds": 4, "delayMaxSeconds": 9, "spawnRadius": 3.4, "despawnRadius": 4.35, "fallResetY": -1.2 },
-    "tap": { "tapReward": 5, "maxPickDistance": 1.2 },
-    "visuals": { "starSpinSpeed": 2.8, "starHeight": 1.55 }
+    "pool": {
+      "maxActive": 3,
+      "initialSpawnCount": 1
+    },
+    "spawn": {
+      "delayMinSeconds": 4,
+      "delayMaxSeconds": 9,
+      "spawnRadius": 4.15,
+      "despawnRadius": 8.2,
+      "fallResetY": -1.2,
+      "basePosition": [
+        -5.55,
+        -2.02
+      ]
+    },
+    "tap": {
+      "tapReward": 5,
+      "maxPickDistance": 1.2
+    },
+    "visuals": {
+      "starSpinSpeed": 2.8,
+      "starHeight": 1.55
+    }
   },
   "orc": {
     "height": 1.05,
     "speed": 0.3,
     "speedJitter": 0.2,
-    "color": "#5f9f5a"
+    "color": "#5f9f5a",
+    "basePosition": [
+      5.35,
+      2.49
+    ]
   },
-  "borshch": { "cookSeconds": 30, "saleReward": 40, "threatRadius": 1.25 },
-  "yard": { "size": 8, "floorHalfHeight": 0.31, "potPosition": [0, 0.35, 0.9], "cameraMinDistance": 6, "cameraMaxDistance": 13, "shadowMapSize": 512, "startingTrapIds": [] },
-  "economy": { "startingCurrency": 0, "earnPerGrab": 3, "earnPerTap": 5 },
-  "combo": { "windowSeconds": 3, "maxCount": 4, "multipliers": [1, 1.5, 2, 3, 4] },
+  "borshch": {
+    "cookSeconds": 30,
+    "saleReward": 40,
+    "threatRadius": 1.25
+  },
+  "yard": {
+    "size": 10,
+    "floorHalfHeight": 0.31,
+    "potPosition": [
+      0,
+      0.35,
+      0.9
+    ],
+    "cameraMinDistance": 6,
+    "cameraMaxDistance": 13,
+    "shadowMapSize": 512,
+    "startingTrapIds": [],
+    "field": {
+      "tileCountPerSide": 2,
+      "tileSize": 1.25,
+      "tileSpacing": 1.35,
+      "growthSeconds": 20
+    }
+  },
+  "islands": [
+    {
+      "kind": "goblin",
+      "position": [
+        -5.55,
+        -2.02
+      ],
+      "radius": 1.5,
+      "topY": 0.06,
+      "height": 0.62,
+      "segments": 8,
+      "rotation": 0.4
+    },
+    {
+      "kind": "orc",
+      "position": [
+        5.35,
+        2.49
+      ],
+      "radius": 1.5,
+      "topY": 0.06,
+      "height": 0.62,
+      "segments": 6,
+      "rotation": 0.53
+    }
+  ],
+  "economy": {
+    "startingCurrency": 0,
+    "earnPerGrab": 3,
+    "earnPerTap": 5
+  },
+  "combo": {
+    "windowSeconds": 3,
+    "maxCount": 4,
+    "multipliers": [
+      1,
+      1.5,
+      2,
+      3,
+      4
+    ]
+  },
   "traps": [
-    { "id": "rake", "cost": 25, "nameKey": "trap_rake", "triggerRadius": 0.55, "resetSeconds": 2.5, "reward": 5 },
-    { "id": "haystack", "cost": 150, "nameKey": "trap_haystack", "triggerRadius": 0.6, "resetSeconds": 3.0, "reward": 25, "launchImpulse": { "x": 0, "y": 5, "z": 2 }, "haystackOffset": { "x": 0, "y": 0, "z": 1.2 } },
-    { "id": "pan", "cost": 120, "nameKey": "trap_pan", "triggerRadius": 0.7, "resetSeconds": 2.0, "reward": 15, "swingTime": 0.25, "swingFrom": -0.6, "swingTo": 1.4 }
-  ]
+    {
+      "id": "rake",
+      "cost": 25,
+      "nameKey": "trap_rake",
+      "triggerRadius": 0.55,
+      "resetSeconds": 2.5,
+      "reward": 5
+    },
+    {
+      "id": "haystack",
+      "cost": 150,
+      "nameKey": "trap_haystack",
+      "triggerRadius": 0.6,
+      "resetSeconds": 3.0,
+      "reward": 25,
+      "launchImpulse": {
+        "x": 0,
+        "y": 5,
+        "z": 2
+      },
+      "haystackOffset": {
+        "x": 0,
+        "y": 0,
+        "z": 1.2
+      }
+    },
+    {
+      "id": "pan",
+      "cost": 120,
+      "nameKey": "trap_pan",
+      "triggerRadius": 0.7,
+      "resetSeconds": 2.0,
+      "reward": 15,
+      "swingTime": 0.25,
+      "swingFrom": -0.6,
+      "swingTo": 1.4
+    },
+    {
+      "id": "air-defence",
+      "cost": 100,
+      "nameKey": "trap_air_defence",
+      "triggerRadius": 2.8,
+      "resetSeconds": 2.5,
+      "reward": 20
+    }
+  ],
+  "cottonAttack": {
+    "maxPerSide": 10,
+    "flightSeconds": 1.2,
+    "arcHeight": 3,
+    "landCost": 100
+  },
+  "bat": {
+    "height": 0.5,
+    "speed": 0.65,
+    "speedJitter": 0.2,
+    "flightHeight": 2,
+    "color": "#76518e",
+    "spawnEvery": 3
+  }
 }

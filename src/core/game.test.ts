@@ -1,15 +1,17 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
 import * as THREE from 'three';
-import { GoblinFSM, GoblinSpawner, OrcFSM } from '../entities/Goblin';
-import { RakeTrap, HaystackLauncher, FryingPanTrap, createTrap, type TrapConfig } from '../entities/Trap';
+import { GoblinFSM, GoblinSpawner, OrcFSM, BatFSM } from '../entities/Goblin';
+import { RakeTrap, HaystackLauncher, FryingPanTrap, AirDefenceTrap, createTrap, type TrapConfig } from '../entities/Trap';
 import { ScoringSystem } from '../systems/ScoringSystem';
 import { ShopSystem } from '../systems/ShopSystem';
 import { EventBus, type GameEvents } from './Events';
 import { useGameStore } from '../state/store';
-import { loadGame, saveGame, validateSave, migrateLegacySave, type LegacySaveData } from './Save';
+import { restoreGame, loadGame, saveGame, validateSave, migrateLegacySave, type LegacySaveData } from './Save';
 import config from '../state/config/game.json';
 import RAPIER from '@dimforge/rapier3d-compat';
-import { getCursorKnockbackImpulse } from './Game';
+import { getIslandLayout } from './LandLayout';
+import { Game, canHarvestCotton, canSelectTrapForPlacement, FIELD_TILE_THICKNESS, getActorFacingYaw, getCursorKnockbackImpulse, getEnemyBasePosition, getEnemySpawnKind, getFieldTilePositions, getFieldTileTopY, getGroundTopY, isValidTrapPlacement, type EnemyKind } from './Game';
+import { Physics } from './Physics';
 
 beforeEach(() => {
   useGameStore.getState().resetStore();
@@ -93,9 +95,73 @@ describe('cursor knockback', () => {
   });
 });
 
+describe('enemy target facing', () => {
+  it.each(['Sneak', 'Grab'])('%s faces its current target in the XZ plane', (state) => {
+    expect(getActorFacingYaw(state, 1, 2, 4, 6)).toBeCloseTo(Math.atan2(3, 4));
+    expect(getActorFacingYaw(state, 4, 6, 1, 2)).toBeCloseTo(Math.atan2(-3, -4));
+  });
+
+  it('keeps flee facing forward and leaves stunned/death poses to their existing controllers', () => {
+    expect(getActorFacingYaw('Flee', 1, 2, 4, 6)).toBe(0);
+    expect(getActorFacingYaw('Stunned', 1, 2, 4, 6)).toBeNull();
+    expect(getActorFacingYaw('Dying', 1, 2, 4, 6)).toBeNull();
+  });
+});
+
 describe('startup traps', () => {
   it('does not configure any trap for automatic startup placement', () => {
     expect(config.yard.startingTrapIds).toEqual([]);
+  });
+});
+
+describe('cotton field', () => {
+  it('has two plots on either side of the central borshch plot', () => {
+    expect(getFieldTilePositions()).toEqual([-2.7, -1.35, 0, 1.35, 2.7]);
+    expect(config.yard.potPosition[0]).toBe(getFieldTilePositions()[2]);
+  });
+
+  it('grows deterministically to its cap, harvests only when ripe, and resets for regrowth', () => {
+    const store = useGameStore.getState();
+    expect(store.harvestCotton()).toBe(false);
+    expect(canHarvestCotton(useGameStore.getState().cottonGrowth)).toBe(false);
+    store.growCotton(config.yard.field.growthSeconds / 4);
+    expect(useGameStore.getState().cottonGrowth).toBe(0.25);
+    expect(store.harvestCotton()).toBe(false);
+    store.growCotton(config.yard.field.growthSeconds);
+    expect(useGameStore.getState().cottonGrowth).toBe(1);
+    expect(canHarvestCotton(useGameStore.getState().cottonGrowth)).toBe(true);
+    expect(store.harvestCotton()).toBe(true);
+    expect(useGameStore.getState().cottonGrowth).toBe(0);
+    expect(store.harvestCotton()).toBe(false);
+  });
+
+  it('rests field tiles flush on the platform surface with no float gap', () => {
+    expect(getFieldTileTopY() - FIELD_TILE_THICKNESS).toBeCloseTo(getGroundTopY());
+    expect(getFieldTileTopY()).toBeCloseTo(0.09);
+  });
+
+  it('resets growth with the rest of the game state', () => {
+    useGameStore.getState().growCotton(config.yard.field.growthSeconds);
+    useGameStore.getState().resetStore();
+    expect(useGameStore.getState().cottonGrowth).toBe(0);
+  });
+});
+
+describe('trap placement', () => {
+  it('allows selecting an owned trap that is not already placed', () => {
+    expect(canSelectTrapForPlacement('rake', ['rake'], [])).toBe(true);
+    expect(canSelectTrapForPlacement('rake', [], [])).toBe(false);
+    expect(canSelectTrapForPlacement('rake', ['rake'], ['rake'])).toBe(false);
+  });
+
+  it('accepts a ground location within the yard bounds', () => {
+    expect(isValidTrapPlacement(1.5, -1)).toBe(true);
+    expect(isValidTrapPlacement(config.yard.size / 2, 0)).toBe(true);
+  });
+
+  it('rejects ground locations outside the yard bounds', () => {
+    expect(isValidTrapPlacement(config.yard.size / 2 + 0.01, 0)).toBe(false);
+    expect(isValidTrapPlacement(Number.NaN, 0)).toBe(false);
   });
 });
 
@@ -114,10 +180,68 @@ describe('GoblinSpawner', () => {
     const rng = () => 0;
     const spawner = new GoblinSpawner(rng, 0.5);
     expect(spawner.update(1, 3, 3)).toBe(false);
+    // Binary-exact fractions (0.5, 0.25) so accumulated timer state never drifts.
     const paced = new GoblinSpawner(rng, 0.5);
-    expect(paced.update(0.3, 0, 3)).toBe(false);
-    expect(paced.update(0.3, 0, 3)).toBe(true);
-    expect(paced.update(0.4, 0, 3)).toBe(false);
+    expect(paced.update(0.25, 0, 3)).toBe(false);
+    expect(paced.update(0.25, 0, 3)).toBe(true);  // timer spent exactly as the second fraction lands
+    expect(paced.update(0.4, 0, 3)).toBe(false);  // refilled for the next paced interval
+  });
+
+  it('uses matching edge bases for alternating faction spawn entries', () => {
+    expect(config.yard.size).toBe(10);
+    const goblin = getIslandLayout('goblin');
+    expect(getEnemyBasePosition('goblin')).toEqual({ x: goblin.x, z: goblin.z, y: goblin.topY });
+    const orc = getIslandLayout('orc');
+    expect(getEnemyBasePosition('orc')).toEqual({ x: orc.x, z: orc.z, y: orc.topY });
+    expect(getEnemySpawnKind(0)).toBe('goblin');
+    expect(getEnemySpawnKind(1)).toBe('orc');
+    expect(getEnemyBasePosition(getEnemySpawnKind(0))).toEqual(getEnemyBasePosition('goblin'));
+    expect(getEnemyBasePosition(getEnemySpawnKind(1))).toEqual(getEnemyBasePosition('orc'));
+  });
+
+  it('keeps faction arrivals on the configured paced spawn interval', () => {
+    const spawner = new GoblinSpawner(() => 0.5, 0.5);
+    // 0.5/0.25 are binary-exact so the accumulated timer has no drift.
+    expect(spawner.update(0.25, 0, config.goblin.pool.maxActive)).toBe(false);
+    expect(spawner.update(0.25, 0, config.goblin.pool.maxActive)).toBe(true);
+    const interval = config.goblin.spawn.delayMinSeconds + 0.5 * (config.goblin.spawn.delayMaxSeconds - config.goblin.spawn.delayMinSeconds);
+    expect(spawner.update(interval - 0.25, 0, config.goblin.pool.maxActive)).toBe(false);
+    expect(spawner.update(0.25, 0, config.goblin.pool.maxActive)).toBe(true);
+  });
+});
+
+describe('diorama platforms', () => {
+  it('mounts each faction base on its own satellite ledge off the main platform', () => {
+    const baseAngles = config.islands
+      .map((island) => getEnemyBasePosition(island.kind as EnemyKind))
+      .map((base) => Math.atan2(base.z, base.x));
+    expect(baseAngles[0]).not.toBeCloseTo(baseAngles[1], 1);
+    for (const island of config.islands) {
+      const base = getEnemyBasePosition(island.kind as EnemyKind);
+      expect(Math.hypot(base.x, base.z)).toBeGreaterThan(config.yard.size / 2);
+      const layout = getIslandLayout(island.kind as EnemyKind);
+      expect(base.y).toBe(layout.topY);
+      expect(Math.hypot(base.x - layout.x, base.z - layout.z)).toBeLessThan(island.radius - 0.5);
+      expect(Math.hypot(island.position[0], island.position[1]) + island.radius).toBeGreaterThan(config.yard.size / 2);
+      // Ledges overlap the main platform so sneaking walkers stay grounded.
+      expect(Math.hypot(island.position[0], island.position[1]) - island.radius).toBeLessThan(config.yard.size / 2);
+    }
+  });
+
+  it('gives every satellite ledge a polygon collider at the canonical visual position', async () => {
+    const physics = await Physics.create();
+    physics.floor();
+    const colliders: RAPIER.Collider[] = [];
+    physics.world.forEachCollider(collider => colliders.push(collider));
+    expect(colliders).toHaveLength(1 + config.islands.length);
+    config.islands.forEach((island, index) => {
+      const layout = getIslandLayout(island.kind as EnemyKind), collider = colliders[index + 1]!;
+      expect(collider.shape).toBeInstanceOf(RAPIER.ConvexPolyhedron);
+      expect(collider.translation().x).toBeCloseTo(layout.x);
+      expect(collider.translation().z).toBeCloseTo(layout.z);
+      expect(collider.translation().y).toBeCloseTo(layout.topY - layout.height / 2);
+    });
+    physics.dispose();
   });
 });
 
@@ -187,10 +311,28 @@ describe('RakeTrap', () => {
 
     trap.trigger(goblin);
 
+    expect(trap.group.children[0].rotation.x).toBeCloseTo(Math.PI / 2);
     expect(triggered).toHaveLength(1);
     expect(triggered[0]).toEqual({ trapId: rakeCfg.id, reward: rakeCfg.reward });
     expect(goblin.state).toBe('Dying');
     expect(trap.triggered).toBe(true);
+  });
+
+  it('lies idle and returns to the lying pose after its reset interval', () => {
+    const events = new EventBus<GameEvents>();
+    const trap = new RakeTrap(events, rakeCfg);
+    trap.place(new THREE.Vector3(0, 0, 0));
+    const handle = trap.group.children[0];
+
+    expect(handle.rotation.x).toBeCloseTo(0);
+
+    trap.trigger(new GoblinFSM(1, events));
+    expect(handle.rotation.x).toBeCloseTo(Math.PI / 2);
+
+    trap.update(trap.resetSeconds);
+    expect(trap.armed).toBe(true);
+    expect(trap.triggered).toBe(false);
+    expect(handle.rotation.x).toBeCloseTo(0);
   });
 
   it('does not affect goblins outside trigger radius in Game.stepActors logic', () => {
@@ -264,6 +406,49 @@ describe('createTrap factory', () => {
     expect(trap.id).toBe(id);
   });
 });
+
+describe('cotton attack progression', () => {
+  it('launches ripe cotton, unlocks sequential land, and caps each side at ten', () => {
+    const store = useGameStore.getState();
+    store.growCotton(config.yard.field.growthSeconds);
+    expect(store.launchCotton('goblin-1')).toBe(true);
+    expect(useGameStore.getState().cottonGrowth).toBe(0);
+    expect(store.destroyBase('goblin-1')).toBe(true);
+    expect(useGameStore.getState().eligibleLand).toEqual(['goblin-1']);
+    store.earn(config.cottonAttack.landCost);
+    expect(store.buyLand('goblin-1')).toBe(true);
+    expect(useGameStore.getState().purchasedLand).toEqual(['goblin-1']);
+    expect(store.launchCotton('goblin-3')).toBe(false);
+    for (let index = 2; index <= 10; index += 1) {
+      store.growCotton(config.yard.field.growthSeconds);
+      expect(store.launchCotton(`goblin-${index}`)).toBe(true);
+      expect(store.destroyBase(`goblin-${index}`)).toBe(true);
+    }
+    store.growCotton(config.yard.field.growthSeconds);
+    expect(store.launchCotton('goblin-10')).toBe(false);
+  });
+});
+
+describe('bat air defence', () => {
+  it('accepts airborne bats but rejects ground enemies', () => {
+    const events = new EventBus<GameEvents>();
+    const trap = new AirDefenceTrap(events, config.traps[3] as TrapConfig);
+    const bat = new BatFSM(2, events);
+    bat.update(1 / 60);
+    const goblin = new GoblinFSM(2, events);
+    goblin.update(1 / 60);
+    expect(trap.accepts(bat)).toBe(true);
+    expect(trap.accepts(goblin)).toBe(false);
+    trap.trigger(bat);
+    expect(bat.state).toBe('Dying');
+    expect(trap.armed).toBe(false);
+  });
+
+  it('is exposed through the trap factory', () => {
+    expect(createTrap('air-defence', new EventBus<GameEvents>())).toBeInstanceOf(AirDefenceTrap);
+  });
+});
+
 
 describe('Combo', () => {
   it('multiplies the second trap reward by 1.5 within the combo window', () => {
@@ -361,5 +546,117 @@ describe('ShopSystem', () => {
     useGameStore.getState().earn(trapCfg.cost);
     expect(shop.buyTrap(trapCfg.id)).toBe(true);
     expect(shop.buyTrap(trapCfg.id)).toBe(false);
+  });
+});
+
+
+describe('purchased land item positions', () => {
+  it('requires ownership, clamps whole items to their tile, and restores saved positions', () => {
+    const state = useGameStore.getState();
+    expect(state.moveDecoration('goblin-1', 'tree-0', 99, -99)).toBe(false);
+    state.growCotton(config.yard.field.growthSeconds);
+    state.launchCotton('goblin-1'); state.destroyBase('goblin-1');
+    state.earn(config.cottonAttack.landCost); state.buyLand('goblin-1');
+    expect(state.moveDecoration('goblin-1', 'tree-0', 99, -99)).toBe(true);
+    expect(state.moveDecoration('goblin-1', 'tree-0', NaN, 0)).toBe(false);
+    expect(state.moveDecoration('goblin-1', 'unknown', 0, 0)).toBe(false);
+    const saved = saveGame({ setItem: () => {} });
+    expect(saved.decorationPositions).toEqual([{ landId: 'goblin-1', itemId: 'tree-0', x: 0.98, z: -0.98 }]);
+    state.resetStore();
+    expect(restoreGame(saved)).toBe(true);
+    expect(useGameStore.getState().decorationPositions).toEqual(saved.decorationPositions);
+    expect(validateSave({ ...saved, decorationPositions: [{ landId: 'orc-1', itemId: 'tree-0', x: 0, z: 0 }] })).toBe(false);
+    for (const invalid of [
+      { landId: 'invalid', itemId: 'tree-0', x: 0, z: 0 },
+      { landId: 'goblin-1', itemId: 'tree-99', x: 0, z: 0 },
+      { landId: 'goblin-1', itemId: 'tree-0', x: NaN, z: 0 },
+      { landId: 'goblin-1', itemId: 'tree-0', x: 0, z: Infinity },
+      { landId: 'goblin-1', itemId: 'tree-0', x: 99, z: 0 },
+    ]) expect(validateSave({ ...saved, decorationPositions: [invalid] })).toBe(false);
+    expect(validateSave({ ...saved, decorationPositions: undefined })).toBe(true);
+  });
+});
+
+it('leaves a gap after cotton impact and grows the successor into view', async () => {
+  const { EnemyBase } = await import('../entities/EnemyBase');
+  const first = new EnemyBase('goblin-1', '#fff', 0, 0, () => new THREE.MeshToonMaterial());
+  const next = new EnemyBase('goblin-2', '#fff', 0, 0, () => new THREE.MeshToonMaterial());
+  next.active = false; next.group.visible = false;
+  const state = useGameStore.getState();
+  state.growCotton(config.yard.field.growthSeconds); state.launchCotton(first.id);
+  const game = Object.create(Game.prototype) as any;
+  Object.assign(game, { bases: [first, next], baseReveals: new Map(), events: new EventBus(), renderer: { root: new THREE.Group() },
+    flights: [{ base: first, mesh: new THREE.Mesh(new THREE.SphereGeometry(), new THREE.MeshBasicMaterial()), origin: new THREE.Vector3(), elapsed: 0 }] });
+  game.stepCottonFlights(config.cottonAttack.flightSeconds);
+  expect(first.group.visible).toBe(false); expect(next.group.visible).toBe(false);
+  game.stepCottonFlights(0.35); expect(next.group.visible).toBe(false);
+  game.stepCottonFlights(0.175); expect(next.group.scale.x).toBeCloseTo(0.5);
+  game.stepCottonFlights(0.175); expect(next.group.visible).toBe(true); expect(next.group.scale.x).toBeCloseTo(1);
+  first.dispose(); next.dispose();
+});
+
+it('renders the bat body as one plain cylinder while retaining its flight FSM', () => {
+  const game = Object.create(Game.prototype) as any;
+  Object.assign(game, { actors: [], events: new EventBus(), renderer: { root: new THREE.Group(),
+    toon: () => new THREE.MeshToonMaterial(), scene: { userData: { addOutlined: () => {} } } },
+    physics: { createGoblinBody: () => ({}) } });
+  const actor = game.createActor('bat');
+  expect(actor.squash.children).toHaveLength(1);
+  expect(actor.squash.children[0].geometry).toBeInstanceOf(THREE.CylinderGeometry);
+  expect(actor.fsm).toBeInstanceOf(BatFSM);
+});
+
+describe('decoration pointer gestures', () => {
+  it.each(['mouse', 'touch'])('drags one whole tree with %s, suppresses taps and camera controls, and cancels safely', (pointerType) => {
+    const state = useGameStore.getState();
+    state.growCotton(config.yard.field.growthSeconds); state.launchCotton('goblin-1'); state.destroyBase('goblin-1');
+    state.earn(config.cottonAttack.landCost); state.buyLand('goblin-1');
+    const handlers = new Map<string, (event: any) => void>();
+    const captured = new Set<number>();
+    const canvas = { style: {}, addEventListener: (name: string, handler: (event: any) => void) => handlers.set(name, handler),
+      setPointerCapture: (id: number) => captured.add(id), hasPointerCapture: (id: number) => captured.has(id),
+      releasePointerCapture: (id: number) => captured.delete(id) };
+    const tile = new THREE.Group(), tree = new THREE.Group();
+    const stem = new THREE.Mesh(new THREE.CylinderGeometry(), new THREE.MeshBasicMaterial());
+    tree.name = 'tree-0'; tree.add(stem); tile.add(tree);
+    const other = new THREE.Mesh(); other.position.set(0.5, 0, 0.5); tile.add(other);
+    const game = Object.create(Game.prototype) as any;
+    const tap = vi.fn(), cotton = vi.fn(), place = vi.fn();
+    let point = new THREE.Vector3();
+    Object.assign(game, { running: true, renderer: { renderer: { domElement: canvas } }, landDecorations: new Map([['goblin-1', tile]]),
+      raycaster: { intersectObjects: () => [{ object: stem }] }, setPointerRay: () => {}, decorationPoint: () => point.clone(),
+      tapGoblin: tap, launchCotton: cotton, placeSelectedTrapAt: place, selectedTrapId: null });
+    game.bindTap();
+    const emit = (name: string, x: number, pointerId = 1) => {
+      const event = { pointerType, button: 0, isPrimary: true, pointerId, clientX: x, clientY: 0,
+        preventDefault: vi.fn(), stopImmediatePropagation: vi.fn() };
+      handlers.get(name)!(event); return event;
+    };
+    expect(emit('pointerdown', 0).stopImmediatePropagation).toHaveBeenCalled();
+    point.set(20, 0, -20);
+    expect(emit('pointermove', 30).stopImmediatePropagation).toHaveBeenCalled();
+    expect(tree.position.toArray()).toEqual([0.98, 0, -0.98]);
+    expect(other.position.toArray()).toEqual([0.5, 0, 0.5]);
+    emit('pointerup', 30);
+    expect(useGameStore.getState().decorationPositions[0]).toMatchObject({ itemId: 'tree-0', x: 0.98, z: -0.98 });
+    expect(tap).not.toHaveBeenCalled(); expect(cotton).not.toHaveBeenCalled(); expect(place).not.toHaveBeenCalled();
+    expect(captured.size).toBe(0);
+    point.set(0, 0, 0); emit('pointerdown', 0);
+    point.set(-20, 0, 20); emit('pointermove', 30); emit('pointercancel', 30);
+    expect(tree.position.toArray()).toEqual([0.98, 0, -0.98]);
+    expect(useGameStore.getState().decorationPositions[0].x).toBe(0.98);
+    // Visibility alone must never authorize movement on unpurchased land.
+    state.resetStore();
+    delete (canvas as Partial<typeof canvas>).setPointerCapture;
+    delete (canvas as Partial<typeof canvas>).hasPointerCapture;
+    delete (canvas as Partial<typeof canvas>).releasePointerCapture;
+    const before = tree.position.clone();
+    emit('pointerdown', 0); emit('pointermove', 30); emit('pointercancel', 30);
+    expect(tree.position.equals(before)).toBe(true);
+    expect(game.decorationDrag).toBeNull();
+    expect(useGameStore.getState().decorationPositions).toEqual([]);
+    state.growCotton(config.yard.field.growthSeconds); state.launchCotton('goblin-1'); state.destroyBase('goblin-1');
+    state.earn(config.cottonAttack.landCost); state.buyLand('goblin-1');
+    expect(() => { emit('pointerdown', 0); emit('pointermove', 30); emit('pointerup', 30); }).not.toThrow();
   });
 });

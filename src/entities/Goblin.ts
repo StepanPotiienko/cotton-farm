@@ -4,6 +4,7 @@ import config from '../state/config/game.json';
 
 export type GoblinState = 'Idle' | 'Sneak' | 'Grab' | 'Flee' | 'Stunned' | 'Recover' | 'Dying';
 export class GoblinFSM {
+  readonly airborne: boolean = false;
   state: GoblinState = 'Idle';
   elapsed = 0;
   springEnabled = true;
@@ -42,6 +43,13 @@ export class GoblinFSM {
 
 /** Orcs use the same gentle slapstick state machine as goblins. */
 export class OrcFSM extends GoblinFSM {}
+
+/** Bats retain the theft/defeat cycle, but fly rather than use the upright spring. */
+export class BatFSM extends GoblinFSM {
+  override readonly airborne = true;
+  override reset(state: GoblinState): void { super.reset(state); this.springEnabled = false; }
+  override transition(state: GoblinState): void { super.transition(state); this.springEnabled = false; }
+}
 
 /** Pure spawn pacing: returns true when a new goblin should enter the yard. */
 export class GoblinSpawner {

@@ -21,7 +21,7 @@ export class AudioManager {
   start(): void {
     if (this.enabled || typeof window === 'undefined') return;
     this.enabled = true;
-    this.track = new Audio('/audio/beautiful-lofi.mp3');
+    this.track = new Audio(`${import.meta.env.BASE_URL}audio/beautiful-lofi.mp3`);
     this.track.loop = true;
     this.track.volume = 0.35;
     void this.track.play().catch(() => {
