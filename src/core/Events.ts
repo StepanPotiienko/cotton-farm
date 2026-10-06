@@ -10,6 +10,8 @@ export interface GameEvents {
   'trap:triggered': { trapId: string; reward: number };
   'shop:purchased': { itemId: string; cost: number };
   'combo:chain': { count: number; multiplier: number; reward: number };
+  'item:moved': { itemId: string };
+  'borshch:sold': { reward: number };
 }
 type Listener<T> = (payload: T) => void;
 export class EventBus<Events extends object> {

@@ -61,7 +61,7 @@ describe('cotton attack foundation', () => {
     events.on('base:destroyed', ({ baseId }) => emitted.push(baseId));
     events.on('land:unlocked', ({ landId }) => emitted.push(landId));
     const game = Object.create(Game.prototype) as Game;
-    Object.assign(game, { bases, flights: [], events, renderer: { root: new THREE.Group(), toon: (color: THREE.ColorRepresentation) => new THREE.MeshToonMaterial({ color }) } });
+    Object.assign(game, { bases, baseReveals: new Map(), flights: [], events, renderer: { root: new THREE.Group(), toon: (color: THREE.ColorRepresentation) => new THREE.MeshToonMaterial({ color }) } });
     mature();
     expect(game.launchCotton()).toBe(true);
     const step = (game as unknown as { stepCottonFlights(delta: number): void }).stepCottonFlights.bind(game);

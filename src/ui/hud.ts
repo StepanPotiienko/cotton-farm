@@ -4,26 +4,36 @@ import { getTrapConfig, isTrapUnlocked } from '../entities/Trap';
 import type { ShopSystem } from '../systems/ShopSystem';
 import type { TrapConfig } from '../entities/Trap';
 import config from '../state/config/game.json';
+import type { EventBus, GameEvents } from '../core/Events';
 
 let shopSystem: ShopSystem | null = null;
 let rootRef: HTMLElement | null = null;
+let unsubscribeHud: (() => void) | null = null;
+let selectBuilding: ((id: 'fence' | 'decor-tree') => boolean) | null = null;
 let selectTrap: ((trapId: string) => boolean) | null = null;
 
-export function setShopSystem(system: ShopSystem, onSelectTrap?: (trapId: string) => boolean): void {
+export function setShopSystem(system: ShopSystem, onSelectTrap?: (trapId: string) => boolean, onSelectBuilding?: (id: 'fence' | 'decor-tree') => boolean): void {
   shopSystem = system;
+  selectBuilding = onSelectBuilding ?? null;
   selectTrap = onSelectTrap ?? null;
 }
 
-export function mountHud(root: HTMLElement, onMusicToggle?: () => boolean): void {
+export function mountHud(root: HTMLElement, onMusicToggle?: () => boolean, events?: EventBus<GameEvents>): void {
+  unsubscribeHud?.();
   rootRef = root;
   root.innerHTML = `
-    <header class="hud-bar"><strong class="brand">${t('title')}</strong><div class="hud-actions"><div class="currency" aria-live="polite"><span class="coin">✿</span><span id="currency-value">0</span><small>${t('currency')}</small></div><button class="hud-button" id="hud-music" type="button" aria-pressed="false">${t('music_off')}</button><button class="hud-button" id="hud-borshch" type="button">${t('borshch')}</button><button class="hud-button" id="hud-shop" type="button">${t('shop')}</button><button class="hud-button" id="hud-settings" type="button">${t('settings')}</button></div></header>
-    <div class="hint">${t('hint')}</div>
+    <header class="hud-bar"><strong class="brand">${t('title')}</strong><div class="hud-actions"><div class="currency" aria-live="polite"><span class="coin">✿</span><span id="currency-value">0</span><small>${t('currency')}</small></div><button class="hud-button" id="hud-music" type="button" aria-pressed="false">${t('music_off')}</button><button class="hud-button" id="hud-shop" type="button">${t('shop')}</button><button class="hud-button" id="hud-settings" type="button">${t('settings')}</button></div></header>
+    <div class="hud-growth">
+      <div class="hud-growth-item"><label for="cotton-progress">${t('cotton')}</label><span id="cotton-status">0%</span><span id="cotton-ready" class="hud-ready" aria-hidden="true" hidden>!</span><progress id="cotton-progress" max="100" value="0"></progress><span id="cotton-announcement" class="hud-sr-only" role="status"></span></div>
+      <div class="hud-growth-item"><label for="hud-borshch-progress">${t('borshch')}</label><span id="hud-borshch-status">0%</span><span id="hud-borshch-ready" class="hud-ready" aria-hidden="true" hidden>!</span><progress id="hud-borshch-progress" max="100" value="0"></progress><span id="borshch-announcement" class="hud-sr-only" role="status"></span></div>
+    </div>
+    <div class="hint">${t('hint')} · ${t('camera_help')}</div>
+    <div id="action-feedback" class="action-feedback" role="status" aria-live="polite" hidden></div>
     <div id="borshch-panel" class="borshch-panel" role="dialog" aria-modal="true" aria-labelledby="borshch-title" hidden>
       <div class="borshch-header"><strong id="borshch-title">${t('borshch')}</strong><button class="hud-button" id="borshch-close" type="button" aria-label="${t('borshch')} — close">×</button></div>
       <div class="borshch-body">
         <progress id="borshch-progress" max="100" value="0" aria-label="${t('borshch')}"></progress>
-        <span id="borshch-status" aria-live="polite">0%</span>
+        <span id="borshch-status">0%</span>
         <button class="hud-button" id="borshch-sell" type="button" disabled>${t('borshch_ready')}</button>
       </div>
     </div>
@@ -43,13 +53,40 @@ export function mountHud(root: HTMLElement, onMusicToggle?: () => boolean): void
   const update = () => {
     const state = useGameStore.getState();
     if (currency) currency.textContent = new Intl.NumberFormat('uk-UA').format(state.currency);
-    const percent = Math.round(state.cookingProgress * 100);
-    if (progress) progress.value = percent;
-    if (status) status.textContent = `${percent}%`;
-    if (sell) sell.disabled = percent < 100;
+    const updateGrowth = (value: number, prefix: string, readyLabel: string) => {
+      const growth = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
+      const ready = growth >= 1;
+      const text = ready ? readyLabel : `${Math.floor(growth * 100)}%`;
+      const bar = root.querySelector(`#${prefix}-progress`) as HTMLProgressElement | null;
+      const label = root.querySelector(`#${prefix}-status`);
+      const marker = root.querySelector(`#${prefix}-ready`) as HTMLElement | null;
+      const announcement = root.querySelector(`#${prefix === 'cotton' ? 'cotton' : 'borshch'}-announcement`);
+      if (bar) { bar.value = growth * 100; bar.setAttribute('aria-valuetext', text); }
+      if (label && label.textContent !== text) label.textContent = text;
+      if (marker) marker.hidden = !ready;
+      // Announce readiness transitions without reading out every growth tick.
+      const message = ready ? readyLabel : '';
+      if (announcement && announcement.textContent !== message) announcement.textContent = message;
+      return { growth, ready, text };
+    };
+    updateGrowth(state.cottonGrowth, 'cotton', t('cotton_ready'));
+    const cooking = updateGrowth(state.cookingProgress, 'hud-borshch', t('borshch_done'));
+    if (progress) { progress.value = cooking.growth * 100; progress.setAttribute('aria-valuetext', cooking.text); }
+    if (status && status.textContent !== cooking.text) status.textContent = cooking.text;
+    if (sell) sell.disabled = !cooking.ready;
   };
   update();
-  useGameStore.subscribe(update);
+  unsubscribeHud = useGameStore.subscribe(update);
+  const feedback = root.querySelector('#action-feedback') as HTMLElement | null;
+  const showFeedback = (message: string) => {
+    if (!feedback) return;
+    feedback.textContent = message; feedback.hidden = false;
+    window.setTimeout(() => { if (feedback.textContent === message) feedback.hidden = true; }, 1400);
+  };
+  events?.on('trap:triggered', ({ trapId }) => showFeedback(`${t('trap_triggered')}: ${trapId}`));
+  events?.on('item:moved', ({ itemId }) => showFeedback(`${t('item_moved')}: ${itemId}`));
+  events?.on('borshch:sold', ({ reward }) => showFeedback(`${t('borshch_sold')}: +${reward}`));
+  events?.on('base:destroyed', () => showFeedback(t('base_destroyed')));
 
   const musicButton = root.querySelector('#hud-music');
   musicButton?.addEventListener('click', () => {
@@ -61,9 +98,7 @@ export function mountHud(root: HTMLElement, onMusicToggle?: () => boolean): void
   sell?.addEventListener('click', () => { useGameStore.getState().sellBorshch(); update(); });
 
   const borshchPanel = root.querySelector('#borshch-panel') as HTMLElement | null;
-  const borshchButton = root.querySelector('#hud-borshch');
   const borshchClose = root.querySelector('#borshch-close');
-  borshchButton?.addEventListener('click', () => { if (borshchPanel) borshchPanel.hidden = false; });
   borshchClose?.addEventListener('click', () => { if (borshchPanel) borshchPanel.hidden = true; });
 
   const settingsPanel = root.querySelector('#settings-panel') as HTMLElement | null;
@@ -104,6 +139,14 @@ function injectShopStyles(): void {
   const style = document.createElement('style');
   style.id = 'shop-styles';
   style.textContent = `
+    .hud-growth { display: flex; flex-wrap: wrap; gap: 10px; padding: 0 clamp(16px, 4vw, 52px); }
+    .action-feedback { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 20; padding: 10px 16px; border: 2px solid #df9842; border-radius: 999px; background: #fff6db; color: #543b29; font-weight: 900; box-shadow: 0 4px 0 #bd8150; pointer-events: none; }
+    .hud-growth-item { flex: 0 1 220px; min-width: 0; padding: 8px 12px; border-radius: 14px; background: #fff6db; color: #543b29; font-size: 13px; font-weight: 700; }
+    .hud-growth-item label { margin-right: 8px; }
+    .hud-ready { margin-left: 6px; color: #543b29; background: #ffe98a; border: 2px solid #df9842; border-radius: 50%; padding: 0 5px; font-weight: 900; }
+    .hud-growth progress { display: block; width: 100%; height: 18px; margin-top: 5px; accent-color: #b76620; }
+    .hud-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    @media (max-width: 560px) { .hud-growth-item { flex: 1 1 120px; } }
     .borshch-panel:not([hidden]) { position: fixed; bottom: max(16px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); width: min(480px, calc(100vw - 24px)); background: #fff6db; border: 3px solid #fff4d4; border-radius: 20px; box-shadow: 0 8px 0 #bd8150; pointer-events: auto; z-index: 12; }
     .borshch-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 2px solid #ffe9be; }
     .borshch-header strong { font-size: 18px; color: #543b29; font-weight: 900; }
@@ -190,7 +233,11 @@ function renderShopTab(tab: string): void {
   } else if (tab === 'farm') {
     renderLandTab(body, shopModal);
   } else if (tab === 'decor') {
-    body.innerHTML = `<div class="shop-item"><div class="shop-item-info"><span class="shop-item-name">🌳 ${t('decor_tree')}</span><span class="shop-item-desc">${t('decor_description')}</span></div><span class="shop-cost">${t('land_bought')}</span></div>`;
+    body.innerHTML = `<p>${t('build_help')} ${t('camera_help')}</p><button class="shop-buy" data-building="fence">${t('fence')}</button> <button class="shop-buy" data-building="decor-tree">${t('decor_tree')}</button>`;
+    body.querySelectorAll<HTMLButtonElement>('[data-building]').forEach(button => button.addEventListener('click', () => {
+      const id = button.dataset.building as 'fence' | 'decor-tree';
+      if (selectBuilding?.(id) && shopModal) shopModal.hidden = true;
+    }));
   } else {
     body.innerHTML = `<div class="shop-empty">${t('coming_soon')}</div>`;
   }

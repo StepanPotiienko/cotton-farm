@@ -1,7 +1,10 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import config from '../state/config/game.json';
+import { getIslandLayout, getLandSlots, getLandSize } from './LandLayout';
 export class Physics {
   readonly world: RAPIER.World;
+  private landColliders = new Map<string, RAPIER.Collider>();
+  private bridgeColliders = new Map<string, RAPIER.Collider>();
   private constructor(world: RAPIER.World) { this.world = world; }
   static async create(): Promise<Physics> {
     await RAPIER.init();
@@ -46,18 +49,62 @@ export class Physics {
     this.world.createCollider(
       RAPIER.ColliderDesc.cylinder(half, config.yard.size / 2).setTranslation(0, -half, 0),
     );
-    // Each satellite ledge gets its own cylinder collider spanning its visible slab
-    // exactly: top face at island.topY, bottom at island.topY - island.height.
+    // Convex prisms match the rotated polygon meshes, including their joining edges.
     for (const island of config.islands) {
-      const islandHalf = island.height / 2;
+      const layout = getIslandLayout(island.kind as 'goblin' | 'orc');
+      const islandHalf = layout.height / 2;
+      const vertices: number[] = [];
+      for (const y of [-islandHalf, islandHalf]) {
+        for (let i = 0; i < layout.segments; i++) {
+          const angle = i * Math.PI * 2 / layout.segments + layout.meshRotation;
+          vertices.push(layout.radius * Math.sin(angle), y, layout.radius * Math.cos(angle));
+        }
+      }
       this.world.createCollider(
-        RAPIER.ColliderDesc.cylinder(islandHalf, island.radius)
-          .setTranslation(island.position[0], island.topY - islandHalf, island.position[1]),
+        RAPIER.ColliderDesc.convexHull(new Float32Array(vertices))!
+          .setTranslation(layout.x, layout.topY - islandHalf, layout.z),
       );
     }
     // Rapier 0.14: the scene query pipeline must be refreshed after collider
     // changes, otherwise static castRay queries miss the freshly added floor
     // colliders until the first step().
+    this.world.updateSceneQueries();
+  }
+  /** Only visible active/destroyed slabs support bodies; future hidden slots have no collider. */
+  syncLandSupport(destroyedBases: string[]): void {
+    for (const slot of getLandSlots()) {
+      const index = Number(slot.id.split('-')[1]);
+      const visible = index === 1 || destroyedBases.includes(slot.id) || destroyedBases.includes(`${slot.side}-${index - 1}`);
+      const existing = this.landColliders.get(slot.id);
+      if (visible && !existing) {
+        const rotation = { x: 0, y: Math.sin(slot.rotation / 2), z: 0, w: Math.cos(slot.rotation / 2) };
+        const size = getLandSize(index);
+        const collider = this.world.createCollider(RAPIER.ColliderDesc.cuboid(size / 2, 0.31, size / 2)
+          .setTranslation(slot.x, slot.y - 0.31, slot.z).setRotation(rotation));
+        this.landColliders.set(slot.id, collider);
+      } else if (!visible && existing) {
+        this.world.removeCollider(existing, true); this.landColliders.delete(slot.id);
+      }
+    }
+    for (const side of ['goblin', 'orc'] as const) {
+      const chain = getLandSlots().filter(slot => slot.side === side);
+      for (let i = 0; i < chain.length; i += 1) {
+        const a = chain[i]!, b = i === 0 ? getIslandLayout(side) : chain[i - 1]!;
+        const key = `${side}-${i}`;
+        const visible = (i === 0 || destroyedBases.includes(chain[i - 1]!.id)) && (i === 0 || destroyedBases.includes(chain[i - 1]!.id));
+        const existing = this.bridgeColliders.get(key);
+        if (!visible && existing) { this.world.removeCollider(existing, true); this.bridgeColliders.delete(key); continue; }
+        if (visible && !existing) {
+          const dx = chain[i]!.x - a.x, dz = chain[i]!.z - a.z;
+          const length = Math.hypot(dx, dz);
+          const rotation = Math.atan2(dx, dz);
+          const collider = this.world.createCollider(RAPIER.ColliderDesc.cuboid(0.22, 0.09, length / 2)
+            .setTranslation((chain[i]!.x + a.x) / 2, chain[i]!.y - 0.09, (chain[i]!.z + a.z) / 2)
+            .setRotation({ x: 0, y: Math.sin(rotation / 2), z: 0, w: Math.cos(rotation / 2) }));
+          this.bridgeColliders.set(key, collider);
+        }
+      }
+    }
     this.world.updateSceneQueries();
   }
   dispose(): void { this.world.free(); }

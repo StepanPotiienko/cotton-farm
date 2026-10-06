@@ -41,6 +41,11 @@ export class GoblinFSM {
   }
 }
 
+export function getDistanceSpeedMultiplier(distanceToPot: number): number {
+  const distance = Math.max(0, Number.isFinite(distanceToPot) ? distanceToPot : 0);
+  return 1 + Math.min(distance / 8, 1.5);
+}
+
 /** Orcs use the same gentle slapstick state machine as goblins. */
 export class OrcFSM extends GoblinFSM {}
 

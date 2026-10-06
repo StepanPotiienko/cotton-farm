@@ -6,10 +6,11 @@ import { ScoringSystem } from '../systems/ScoringSystem';
 import { ShopSystem } from '../systems/ShopSystem';
 import { EventBus, type GameEvents } from './Events';
 import { useGameStore } from '../state/store';
-import { loadGame, saveGame, validateSave, migrateLegacySave, type LegacySaveData } from './Save';
+import { restoreGame, loadGame, saveGame, validateSave, migrateLegacySave, type LegacySaveData } from './Save';
 import config from '../state/config/game.json';
 import RAPIER from '@dimforge/rapier3d-compat';
-import { canHarvestCotton, canSelectTrapForPlacement, FIELD_TILE_THICKNESS, getActorFacingYaw, getCursorKnockbackImpulse, getEnemyBasePosition, getEnemySpawnKind, getFieldTilePositions, getFieldTileTopY, getGroundTopY, isValidTrapPlacement, type EnemyKind } from './Game';
+import { getIslandLayout } from './LandLayout';
+import { Game, canHarvestCotton, canSelectTrapForPlacement, FIELD_TILE_THICKNESS, getActorFacingYaw, getCursorKnockbackImpulse, getEnemyBasePosition, getEnemySpawnKind, getFieldTilePositions, getFieldTileTopY, getGroundTopY, isValidTrapPlacement, type EnemyKind } from './Game';
 import { Physics } from './Physics';
 
 beforeEach(() => {
@@ -188,8 +189,10 @@ describe('GoblinSpawner', () => {
 
   it('uses matching edge bases for alternating faction spawn entries', () => {
     expect(config.yard.size).toBe(10);
-    expect(getEnemyBasePosition('goblin')).toEqual({ x: -5.55, z: -2.02, y: 0.06 });
-    expect(getEnemyBasePosition('orc')).toEqual({ x: 5.35, z: 2.49, y: 0.06 });
+    const goblin = getIslandLayout('goblin');
+    expect(getEnemyBasePosition('goblin')).toEqual({ x: goblin.x, z: goblin.z, y: goblin.topY });
+    const orc = getIslandLayout('orc');
+    expect(getEnemyBasePosition('orc')).toEqual({ x: orc.x, z: orc.z, y: orc.topY });
     expect(getEnemySpawnKind(0)).toBe('goblin');
     expect(getEnemySpawnKind(1)).toBe('orc');
     expect(getEnemyBasePosition(getEnemySpawnKind(0))).toEqual(getEnemyBasePosition('goblin'));
@@ -216,30 +219,27 @@ describe('diorama platforms', () => {
     for (const island of config.islands) {
       const base = getEnemyBasePosition(island.kind as EnemyKind);
       expect(Math.hypot(base.x, base.z)).toBeGreaterThan(config.yard.size / 2);
-      expect(base.y).toBe(island.topY);
-      expect(Math.hypot(base.x - island.position[0], base.z - island.position[1])).toBeLessThan(island.radius - 0.5);
+      const layout = getIslandLayout(island.kind as EnemyKind);
+      expect(base.y).toBe(layout.topY);
+      expect(Math.hypot(base.x - layout.x, base.z - layout.z)).toBeLessThan(island.radius - 0.5);
       expect(Math.hypot(island.position[0], island.position[1]) + island.radius).toBeGreaterThan(config.yard.size / 2);
       // Ledges overlap the main platform so sneaking walkers stay grounded.
       expect(Math.hypot(island.position[0], island.position[1]) - island.radius).toBeLessThan(config.yard.size / 2);
     }
   });
 
-  it('gives every satellite ledge a cylinder collider matching its visual slab', async () => {
-    await RAPIER.init();
+  it('gives every satellite ledge a polygon collider at the canonical visual position', async () => {
     const physics = await Physics.create();
     physics.floor();
-    const colliders: { y: number; radius: number; halfHeight: number }[] = [];
-    physics.world.forEachCollider((collider) => {
-      const shape = collider.shape as RAPIER.Cylinder;
-      colliders.push({ y: collider.translation().y, radius: shape.radius, halfHeight: shape.halfHeight });
-    });
-    const ledgeColliders = colliders.slice(1); // index 0 is the central round platform
-    expect(colliders[0].radius).toBe(config.yard.size / 2);
-    expect(ledgeColliders).toHaveLength(config.islands.length);
+    const colliders: RAPIER.Collider[] = [];
+    physics.world.forEachCollider(collider => colliders.push(collider));
+    expect(colliders).toHaveLength(1 + config.islands.length);
     config.islands.forEach((island, index) => {
-      expect(ledgeColliders[index].radius).toBeCloseTo(island.radius);
-      expect(ledgeColliders[index].halfHeight).toBeCloseTo(island.height / 2);
-      expect(ledgeColliders[index].y).toBeCloseTo(island.topY - island.height / 2);
+      const layout = getIslandLayout(island.kind as EnemyKind), collider = colliders[index + 1]!;
+      expect(collider.shape).toBeInstanceOf(RAPIER.ConvexPolyhedron);
+      expect(collider.translation().x).toBeCloseTo(layout.x);
+      expect(collider.translation().z).toBeCloseTo(layout.z);
+      expect(collider.translation().y).toBeCloseTo(layout.topY - layout.height / 2);
     });
     physics.dispose();
   });
@@ -546,5 +546,117 @@ describe('ShopSystem', () => {
     useGameStore.getState().earn(trapCfg.cost);
     expect(shop.buyTrap(trapCfg.id)).toBe(true);
     expect(shop.buyTrap(trapCfg.id)).toBe(false);
+  });
+});
+
+
+describe('purchased land item positions', () => {
+  it('requires ownership, clamps whole items to their tile, and restores saved positions', () => {
+    const state = useGameStore.getState();
+    expect(state.moveDecoration('goblin-1', 'tree-0', 99, -99)).toBe(false);
+    state.growCotton(config.yard.field.growthSeconds);
+    state.launchCotton('goblin-1'); state.destroyBase('goblin-1');
+    state.earn(config.cottonAttack.landCost); state.buyLand('goblin-1');
+    expect(state.moveDecoration('goblin-1', 'tree-0', 99, -99)).toBe(true);
+    expect(state.moveDecoration('goblin-1', 'tree-0', NaN, 0)).toBe(false);
+    expect(state.moveDecoration('goblin-1', 'unknown', 0, 0)).toBe(false);
+    const saved = saveGame({ setItem: () => {} });
+    expect(saved.decorationPositions).toEqual([{ landId: 'goblin-1', itemId: 'tree-0', x: 0.98, z: -0.98 }]);
+    state.resetStore();
+    expect(restoreGame(saved)).toBe(true);
+    expect(useGameStore.getState().decorationPositions).toEqual(saved.decorationPositions);
+    expect(validateSave({ ...saved, decorationPositions: [{ landId: 'orc-1', itemId: 'tree-0', x: 0, z: 0 }] })).toBe(false);
+    for (const invalid of [
+      { landId: 'invalid', itemId: 'tree-0', x: 0, z: 0 },
+      { landId: 'goblin-1', itemId: 'tree-99', x: 0, z: 0 },
+      { landId: 'goblin-1', itemId: 'tree-0', x: NaN, z: 0 },
+      { landId: 'goblin-1', itemId: 'tree-0', x: 0, z: Infinity },
+      { landId: 'goblin-1', itemId: 'tree-0', x: 99, z: 0 },
+    ]) expect(validateSave({ ...saved, decorationPositions: [invalid] })).toBe(false);
+    expect(validateSave({ ...saved, decorationPositions: undefined })).toBe(true);
+  });
+});
+
+it('leaves a gap after cotton impact and grows the successor into view', async () => {
+  const { EnemyBase } = await import('../entities/EnemyBase');
+  const first = new EnemyBase('goblin-1', '#fff', 0, 0, () => new THREE.MeshToonMaterial());
+  const next = new EnemyBase('goblin-2', '#fff', 0, 0, () => new THREE.MeshToonMaterial());
+  next.active = false; next.group.visible = false;
+  const state = useGameStore.getState();
+  state.growCotton(config.yard.field.growthSeconds); state.launchCotton(first.id);
+  const game = Object.create(Game.prototype) as any;
+  Object.assign(game, { bases: [first, next], baseReveals: new Map(), events: new EventBus(), renderer: { root: new THREE.Group() },
+    flights: [{ base: first, mesh: new THREE.Mesh(new THREE.SphereGeometry(), new THREE.MeshBasicMaterial()), origin: new THREE.Vector3(), elapsed: 0 }] });
+  game.stepCottonFlights(config.cottonAttack.flightSeconds);
+  expect(first.group.visible).toBe(false); expect(next.group.visible).toBe(false);
+  game.stepCottonFlights(0.35); expect(next.group.visible).toBe(false);
+  game.stepCottonFlights(0.175); expect(next.group.scale.x).toBeCloseTo(0.5);
+  game.stepCottonFlights(0.175); expect(next.group.visible).toBe(true); expect(next.group.scale.x).toBeCloseTo(1);
+  first.dispose(); next.dispose();
+});
+
+it('renders the bat body as one plain cylinder while retaining its flight FSM', () => {
+  const game = Object.create(Game.prototype) as any;
+  Object.assign(game, { actors: [], events: new EventBus(), renderer: { root: new THREE.Group(),
+    toon: () => new THREE.MeshToonMaterial(), scene: { userData: { addOutlined: () => {} } } },
+    physics: { createGoblinBody: () => ({}) } });
+  const actor = game.createActor('bat');
+  expect(actor.squash.children).toHaveLength(1);
+  expect(actor.squash.children[0].geometry).toBeInstanceOf(THREE.CylinderGeometry);
+  expect(actor.fsm).toBeInstanceOf(BatFSM);
+});
+
+describe('decoration pointer gestures', () => {
+  it.each(['mouse', 'touch'])('drags one whole tree with %s, suppresses taps and camera controls, and cancels safely', (pointerType) => {
+    const state = useGameStore.getState();
+    state.growCotton(config.yard.field.growthSeconds); state.launchCotton('goblin-1'); state.destroyBase('goblin-1');
+    state.earn(config.cottonAttack.landCost); state.buyLand('goblin-1');
+    const handlers = new Map<string, (event: any) => void>();
+    const captured = new Set<number>();
+    const canvas = { style: {}, addEventListener: (name: string, handler: (event: any) => void) => handlers.set(name, handler),
+      setPointerCapture: (id: number) => captured.add(id), hasPointerCapture: (id: number) => captured.has(id),
+      releasePointerCapture: (id: number) => captured.delete(id) };
+    const tile = new THREE.Group(), tree = new THREE.Group();
+    const stem = new THREE.Mesh(new THREE.CylinderGeometry(), new THREE.MeshBasicMaterial());
+    tree.name = 'tree-0'; tree.add(stem); tile.add(tree);
+    const other = new THREE.Mesh(); other.position.set(0.5, 0, 0.5); tile.add(other);
+    const game = Object.create(Game.prototype) as any;
+    const tap = vi.fn(), cotton = vi.fn(), place = vi.fn();
+    let point = new THREE.Vector3();
+    Object.assign(game, { running: true, renderer: { renderer: { domElement: canvas } }, landDecorations: new Map([['goblin-1', tile]]),
+      raycaster: { intersectObjects: () => [{ object: stem }] }, setPointerRay: () => {}, decorationPoint: () => point.clone(),
+      tapGoblin: tap, launchCotton: cotton, placeSelectedTrapAt: place, selectedTrapId: null });
+    game.bindTap();
+    const emit = (name: string, x: number, pointerId = 1) => {
+      const event = { pointerType, button: 0, isPrimary: true, pointerId, clientX: x, clientY: 0,
+        preventDefault: vi.fn(), stopImmediatePropagation: vi.fn() };
+      handlers.get(name)!(event); return event;
+    };
+    expect(emit('pointerdown', 0).stopImmediatePropagation).toHaveBeenCalled();
+    point.set(20, 0, -20);
+    expect(emit('pointermove', 30).stopImmediatePropagation).toHaveBeenCalled();
+    expect(tree.position.toArray()).toEqual([0.98, 0, -0.98]);
+    expect(other.position.toArray()).toEqual([0.5, 0, 0.5]);
+    emit('pointerup', 30);
+    expect(useGameStore.getState().decorationPositions[0]).toMatchObject({ itemId: 'tree-0', x: 0.98, z: -0.98 });
+    expect(tap).not.toHaveBeenCalled(); expect(cotton).not.toHaveBeenCalled(); expect(place).not.toHaveBeenCalled();
+    expect(captured.size).toBe(0);
+    point.set(0, 0, 0); emit('pointerdown', 0);
+    point.set(-20, 0, 20); emit('pointermove', 30); emit('pointercancel', 30);
+    expect(tree.position.toArray()).toEqual([0.98, 0, -0.98]);
+    expect(useGameStore.getState().decorationPositions[0].x).toBe(0.98);
+    // Visibility alone must never authorize movement on unpurchased land.
+    state.resetStore();
+    delete (canvas as Partial<typeof canvas>).setPointerCapture;
+    delete (canvas as Partial<typeof canvas>).hasPointerCapture;
+    delete (canvas as Partial<typeof canvas>).releasePointerCapture;
+    const before = tree.position.clone();
+    emit('pointerdown', 0); emit('pointermove', 30); emit('pointercancel', 30);
+    expect(tree.position.equals(before)).toBe(true);
+    expect(game.decorationDrag).toBeNull();
+    expect(useGameStore.getState().decorationPositions).toEqual([]);
+    state.growCotton(config.yard.field.growthSeconds); state.launchCotton('goblin-1'); state.destroyBase('goblin-1');
+    state.earn(config.cottonAttack.landCost); state.buyLand('goblin-1');
+    expect(() => { emit('pointerdown', 0); emit('pointermove', 30); emit('pointerup', 30); }).not.toThrow();
   });
 });

@@ -1,9 +1,11 @@
-import { useGameStore, type GameState, type AttackProgress, initialAttackProgress, baseSide } from '../state/store';
+import { useGameStore, type GameState, type AttackProgress, initialAttackProgress, baseSide, decorationLimit } from '../state/store';
 import config from '../state/config/game.json';
+import { getPurchasedSurface, itemMargin } from './LandLayout';
 
 export interface SaveData {
   version: 2;
   attackProgress?: AttackProgress;
+  decorationPositions?: GameState['decorationPositions'];
   currency: number;
   inventory: string[];
   placed: GameState['placed'];
@@ -41,10 +43,19 @@ export function defaultSave(): SaveData {
 export function validateSave(value: unknown): value is SaveData {
   if (!value || typeof value !== 'object') return false;
   const data = value as Partial<SaveData>;
-  return (data.attackProgress === undefined || validateAttackProgress(data.attackProgress)) && data.version === 2 && Number.isFinite(data.currency) && (data.currency ?? -1) >= 0 &&
+  if (data.attackProgress !== undefined && !validateAttackProgress(data.attackProgress)) return false;
+  return (data.decorationPositions === undefined || (Array.isArray(data.decorationPositions) &&
+    data.decorationPositions.every((p) => {
+      if (!p || typeof p.itemId !== 'string') return false;
+      const limit = decorationLimit(p.itemId);
+      return limit !== null && data.attackProgress?.purchasedLand.includes(p.landId) &&
+        Number.isFinite(p.x) && Number.isFinite(p.z) && Math.abs(p.x) <= limit && Math.abs(p.z) <= limit;
+    }) && new Set(data.decorationPositions.map((p) => `${p.landId}/${p.itemId}`)).size === data.decorationPositions.length)) && data.version === 2 && Number.isFinite(data.currency) && (data.currency ?? -1) >= 0 &&
     Array.isArray(data.inventory) && data.inventory.every((item) => typeof item === 'string') &&
     Array.isArray(data.placed) && data.placed.every((entry) => !!entry && typeof entry.itemId === 'string' &&
-      Array.isArray(entry.position) && entry.position.length === 3 && entry.position.every(Number.isFinite)) &&
+      Array.isArray(entry.position) && entry.position.length === 3 && entry.position.every(Number.isFinite) &&
+      (entry.landId === undefined || (typeof entry.landId === 'string' && itemMargin(entry.itemId) !== null &&
+        getPurchasedSurface(entry.position[0], entry.position[2], data.attackProgress?.purchasedLand ?? [], itemMargin(entry.itemId)!)?.id === entry.landId))) &&
     Array.isArray(data.ownedItems) && data.ownedItems.every((item) => typeof item === 'string') &&
     Array.isArray(data.unlockedTraps) && data.unlockedTraps.every((item) => typeof item === 'string') &&
     typeof data.settings === 'object' && data.settings !== null &&
@@ -74,8 +85,10 @@ export function restoreGame(data: SaveData): boolean {
   state.resetStore();
   state.restoreProgress(data.attackProgress ?? initialAttackProgress());
   state.earn(Math.max(0, data.currency - useGameStore.getState().currency));
+  state.restorePlaced(data.placed);
   for (const id of data.unlockedTraps) state.unlockTrap(id);
   for (const id of data.ownedItems) state.ownItem(id);
+  for (const p of data.decorationPositions ?? []) state.moveDecoration(p.landId, p.itemId, p.x, p.z);
   return true;
 }
 
@@ -103,6 +116,7 @@ export function saveGame(storage: Pick<Storage, 'setItem'> = localStorage): Save
       eligibleLand: [...state.eligibleLand], purchasedLand: [...state.purchasedLand],
     },
     currency: state.currency,
+    decorationPositions: state.decorationPositions.map((p) => ({ ...p })),
     inventory: [...state.inventory],
     placed: [...state.placed],
     ownedItems: [...state.ownedItems],

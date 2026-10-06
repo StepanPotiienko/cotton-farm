@@ -1,5 +1,6 @@
 import { createStore } from '../core/storeBase';
 import config from './config/game.json';
+import { getPurchasedSurface, isOnYard, itemMargin } from '../core/LandLayout';
 
 export type BaseSide = 'goblin' | 'orc';
 export const MAX_ATTACKS_PER_SIDE = Math.min(10, config.cottonAttack.maxPerSide);
@@ -19,10 +20,23 @@ export interface AttackProgress {
 export function initialAttackProgress(): AttackProgress {
   return { attacks: { goblin: 0, orc: 0 }, destroyedCounts: { goblin: 0, orc: 0 }, pendingBases: [], destroyedBases: [], eligibleLand: [], purchasedLand: [] };
 }
+export interface DecorationPosition { landId: string; itemId: string; x: number; z: number; }
+// The decoration patch is 2.4 units wide. Reserve room for the whole crown/flower.
+export function decorationLimit(itemId: string): number | null {
+  if (/^tree-[0-2]$/.test(itemId)) return 1.2 - (0.22 + Number(itemId.slice(-1)) * 0.03);
+  if (/^flower-[0-4]$/.test(itemId)) return 1.2 - 0.06;
+  return null;
+}
+
 export interface GameState extends AttackProgress {
+  decorationPositions: DecorationPosition[];
+  moveDecoration(landId: string, itemId: string, x: number, z: number): boolean;
+  moveItem(index: number, x: number, z: number): boolean;
   currency: number;
   inventory: string[];
-  placed: { itemId: string; position: [number, number, number] }[];
+  placed: { itemId: string; position: [number, number, number]; landId?: string }[];
+  placeItem(itemId: string, x: number, z: number): boolean;
+  restorePlaced(placed: GameState['placed']): void;
   ownedItems: string[];
   unlockedTraps: string[];
   settings: { locale: 'uk' | 'en'; sound: boolean };
@@ -47,6 +61,7 @@ export interface GameState extends AttackProgress {
 export const useGameStore = createStore<GameState>((set, get) => ({
   ...initialAttackProgress(),
   currency: config.economy.startingCurrency,
+  decorationPositions: [],
   inventory: [],
   placed: [],
   ownedItems: [],
@@ -54,6 +69,36 @@ export const useGameStore = createStore<GameState>((set, get) => ({
   cookingProgress: 0,
   cottonGrowth: 0,
   settings: { locale: 'uk', sound: true },
+  restorePlaced: (placed) => set({ placed: placed.map(p => ({ ...p, position: [...p.position] })) }),
+  placeItem: (itemId, x, z) => {
+    const state = get(), margin = itemMargin(itemId);
+    if (margin === null) return false;
+    const trap = config.traps.some(t => t.id === itemId);
+    if (trap && (!state.unlockedTraps.includes(itemId) || state.placed.some(p => p.itemId === itemId))) return false;
+    const slot = getPurchasedSurface(x, z, state.purchasedLand, margin);
+    if (!slot && (!trap || !isOnYard(x, z, margin))) return false;
+    set({ placed: [...state.placed, { itemId, position: [x, slot?.y ?? 0, z], ...(slot ? { landId: slot.id } : {}) }] });
+    return true;
+  },
+  moveItem: (index, x, z) => {
+    const state = get(), entry = state.placed[index], margin = entry ? itemMargin(entry.itemId) : null;
+    if (!entry || margin === null || !Number.isFinite(x) || !Number.isFinite(z)) return false;
+    const trap = config.traps.some(t => t.id === entry.itemId);
+    const slot = getPurchasedSurface(x, z, state.purchasedLand, margin);
+    if (!slot && (!trap || !isOnYard(x, z, margin))) return false;
+    const placed = state.placed.map((item, itemIndex) => itemIndex === index
+      ? { ...item, position: [x, slot?.y ?? 0, z] as [number, number, number], ...(slot ? { landId: slot.id } : { landId: undefined }) }
+      : item);
+    set({ placed });
+    return true;
+  },
+  moveDecoration: (landId, itemId, x, z) => {
+    const limit = decorationLimit(itemId);
+    if (!get().purchasedLand.includes(landId) || limit === null || !Number.isFinite(x) || !Number.isFinite(z)) return false;
+    const position = { landId, itemId, x: Math.max(-limit, Math.min(limit, x)), z: Math.max(-limit, Math.min(limit, z)) };
+    set({ decorationPositions: [...get().decorationPositions.filter((p) => p.landId !== landId || p.itemId !== itemId), position] });
+    return true;
+  },
   earn: (amount) => {
     if (Number.isFinite(amount) && amount >= 0) set({ currency: get().currency + amount });
   },
@@ -116,7 +161,8 @@ export const useGameStore = createStore<GameState>((set, get) => ({
   },
   resetStore: () => set({
     ...initialAttackProgress(),
-  currency: config.economy.startingCurrency,
+    currency: config.economy.startingCurrency,
+    decorationPositions: [],
     inventory: [],
     placed: [],
     ownedItems: [],
