@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { BaseSide } from '../state/store';
+import { cloneModel } from '../core/Models';
 
 /** Small, self-contained base landmark for an enemy faction. */
 export class EnemyBase {
@@ -16,6 +17,8 @@ export class EnemyBase {
   constructor(name: string, color: THREE.ColorRepresentation, x: number, z: number, toon: (color: THREE.ColorRepresentation) => THREE.MeshToonMaterial, y = 0) {
     this.group.name = name.includes('-') ? name : `${name}-1`;
     this.group.position.set(x, y, z);
+    const model = cloneModel(this.side === 'orc' ? 'base_orc' : 'base_goblin');
+    if (model) { this.group.add(model); return; }
     const material = toon(color);
     this.materials.push(material);
     const addMesh = (geo: THREE.BufferGeometry, y: number, scaleX = 1, scaleZ = 1) => {

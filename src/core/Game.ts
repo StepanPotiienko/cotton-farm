@@ -12,6 +12,7 @@ import { ShopSystem } from '../systems/ShopSystem';
 import { decorationLimit, useGameStore } from '../state/store';
 import { setShopSystem } from '../ui/hud';
 import config from '../state/config/game.json';
+import { cloneModel, disposeObject, modelPart } from './Models';
 import { getLandSlots, getIslandLayout, getLandSize, getLandScale, LAND_SIZE, PLAYER_LAND_SIZE, isOnYard } from './LandLayout';
 
 interface GoblinActor {
@@ -23,6 +24,9 @@ interface GoblinActor {
   stars: THREE.Group;
   walkPhase: number;
   speed: number;
+  /** Bat wings flap around the body's forward axis when the Blender model is loaded. */
+  wings?: [THREE.Object3D, THREE.Object3D];
+  flapPhase?: number;
 }
 
 interface ActorVisuals { group: THREE.Group; squash: THREE.Group; stars: THREE.Group; body: THREE.Mesh; }
@@ -95,7 +99,7 @@ export class Game {
   actors: GoblinActor[] = [];
   freeActors: GoblinActor[] = [];
   traps: Trap[] = [];
-  private flights: { base: EnemyBase; mesh: THREE.Mesh; origin: THREE.Vector3; elapsed: number }[] = [];
+  private flights: { base: EnemyBase; mesh: THREE.Object3D; origin: THREE.Vector3; elapsed: number }[] = [];
   private bases: EnemyBase[] = [];
   private landPlatforms = new Map<string, THREE.Mesh>();
   private landPlatformsUnsubscribe?: () => void;
@@ -160,9 +164,9 @@ export class Game {
     this.bases = [];
     this.landPlatformsUnsubscribe?.();
     this.landPhysicsUnsubscribe?.();
-    for (const mesh of this.landPlatforms.values()) { this.renderer.root.remove(mesh); mesh.geometry.dispose(); (mesh.material as THREE.Material).dispose(); }
+    for (const mesh of this.landPlatforms.values()) { this.renderer.root.remove(mesh); disposeObject(mesh); }
     this.landPlatforms.clear();
-    for (const group of this.placedBuildings) { this.renderer.root.remove(group); group.traverse(o => { if (o instanceof THREE.Mesh) { o.geometry.dispose(); (o.material as THREE.Material).dispose(); } }); }
+    for (const group of this.placedBuildings) { this.renderer.root.remove(group); disposeObject(group); }
     this.placedBuildings = [];
     this.placedVisuals.clear();
     this.baseReveals.clear();
@@ -171,19 +175,12 @@ export class Game {
     this.landDecorationsUnsubscribe = undefined;
     for (const [landId, decoration] of this.landDecorations) {
       this.renderer.root.remove(decoration);
-      decoration.traverse((child) => {
-        if (child instanceof THREE.Mesh) {
-          child.geometry.dispose();
-          const materials = Array.isArray(child.material) ? child.material : [child.material];
-          materials.forEach((material) => material.dispose());
-        }
-      });
+      disposeObject(decoration);
       this.landDecorations.delete(landId);
     }
     for (const flight of this.flights) {
       this.renderer.root.remove(flight.mesh);
-      flight.mesh.geometry.dispose();
-      (flight.mesh.material as THREE.Material).dispose();
+      disposeObject(flight.mesh);
     }
     this.flights = [];
     for (const trap of this.traps) { this.renderer.root.remove(trap.group); trap.dispose(); }
@@ -286,6 +283,11 @@ export class Game {
     if (entry.itemId !== 'fence' && entry.itemId !== 'decor-tree') return;
     const group = new THREE.Group(); group.position.set(...entry.position);
     const slot = getLandSlots().find(s => s.id === entry.landId); group.rotation.y = slot?.rotation ?? 0;
+    const model = cloneModel(entry.itemId === 'fence' ? 'fence' : 'tree_pine');
+    if (model) {
+      group.add(model);
+      this.placedBuildings.push(group); this.placedVisuals?.set(entryIndex, group); this.renderer.root.add(group); return;
+    }
     const material = this.renderer.toon(entry.itemId === 'fence' ? '#8f6245' : '#4f7f46');
     const add = (geometry: THREE.BufferGeometry, x: number, y: number) => { const mesh = new THREE.Mesh(geometry, material); mesh.position.set(x,y,0); mesh.castShadow = true; group.add(mesh); };
     if (entry.itemId === 'fence') {
@@ -346,6 +348,8 @@ export class Game {
     const group = new THREE.Group();
     const squash = new THREE.Group();
     group.add(squash);
+    const model = cloneModel(kind);
+    if (model) return this.createModelActor(kind, model, group, squash);
     const body = new THREE.Mesh(kind === 'bat' ? new THREE.CylinderGeometry(config.goblin.radius, config.goblin.radius, config.goblin.height, 12) : isOrc ? visuals.orcBody : visuals.capsule, kind === 'bat' ? this.renderer.toon(config.bat.color) : isOrc ? visuals.orcMat : visuals.bodyMat);
     body.position.y = (isOrc ? config.orc.height : config.goblin.height) / 2;
     body.castShadow = true;
@@ -377,6 +381,31 @@ export class Game {
     const fsm = kind === 'bat' ? new BatFSM(Date.now(), this.events) : isOrc ? new OrcFSM(Date.now() % 100000 + this.actors.length * 13, this.events) : new GoblinFSM(Date.now() % 100000 + this.actors.length * 13, this.events);
     const rapierBody = this.physics.createGoblinBody({ x: 0, y: config.goblin.height / 2 + 0.05, z: this.spawnEdgeZ });
     const actor: GoblinActor = { kind, fsm, body: rapierBody, group, squash, stars, walkPhase: 0, speed: isOrc ? config.orc.speed : config.goblin.speed };
+    this.events.emit('goblin:state', { state: 'spawn' });
+    return actor;
+  }
+
+  /** Blender-model actor: same group/squash/stars rig as the primitive fallback. */
+  private createModelActor(kind: EnemyKind | 'bat', model: THREE.Group, group: THREE.Group, squash: THREE.Group): GoblinActor {
+    const isOrc = kind === 'orc';
+    // Characters are modelled feet-at-origin; bats are centred where the old body sat.
+    if (kind === 'bat') model.position.y = config.goblin.height / 2;
+    squash.add(model);
+    const body = modelPart(model, 'body') as THREE.Mesh;
+    this.renderer.scene.userData.addOutlined(body);
+    const stars = new THREE.Group();
+    stars.position.y = config.goblin.visuals.starHeight;
+    for (let i = 0; i < 3; i += 1) {
+      const star = cloneModel('star')!;
+      star.position.set((i - 1) * 0.32, 0.15 + Math.abs(i - 1) * 0.1, 0);
+      stars.add(star);
+    }
+    stars.visible = false;
+    this.renderer.root.add(group, stars);
+    const wings = kind === 'bat' ? [modelPart(model, 'wing_l')!, modelPart(model, 'wing_r')!] as [THREE.Object3D, THREE.Object3D] : undefined;
+    const fsm = kind === 'bat' ? new BatFSM(Date.now(), this.events) : isOrc ? new OrcFSM(Date.now() % 100000 + this.actors.length * 13, this.events) : new GoblinFSM(Date.now() % 100000 + this.actors.length * 13, this.events);
+    const rapierBody = this.physics.createGoblinBody({ x: 0, y: config.goblin.height / 2 + 0.05, z: this.spawnEdgeZ });
+    const actor: GoblinActor = { kind, fsm, body: rapierBody, group, squash, stars, walkPhase: 0, speed: isOrc ? config.orc.speed : config.goblin.speed, wings };
     this.events.emit('goblin:state', { state: 'spawn' });
     return actor;
   }
@@ -449,6 +478,12 @@ export class Game {
       const pulse = state === 'Grab' ? 1 + Math.sin(fsm.elapsed * 18) * 0.08 : 1;
       squash.scale.set(1 / pulse, pulse, 1 / pulse);
       stars.visible = state === 'Stunned';
+    }
+    if (actor.wings) {
+      actor.flapPhase = (actor.flapPhase ?? 0) + delta * (state === 'Dying' ? 4 : 16);
+      const flap = Math.sin(actor.flapPhase) * 0.55;
+      actor.wings[0].rotation.z = -flap;
+      actor.wings[1].rotation.z = flap;
     }
     stars.position.x = group.position.x;
     stars.position.z = group.position.z;
@@ -628,7 +663,7 @@ export class Game {
   }
   private createCottonFlight(base: EnemyBase): void {
     base.targeted = true;
-    const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 6), this.renderer.toon('#fff5df'));
+    const mesh = cloneModel('cotton_ball') ?? new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 6), this.renderer.toon('#fff5df'));
     const origin = new THREE.Vector3(0, getFieldTileTopY() + 0.5, 0);
     mesh.position.copy(origin); this.renderer.root.add(mesh);
     this.flights.push({ base, mesh, origin, elapsed: 0 });
@@ -658,8 +693,7 @@ export class Game {
         this.events.emit('base:destroyed', { baseId: flight.base.id, side: flight.base.side });
         this.events.emit('land:unlocked', { landId: flight.base.id });
       }
-      this.renderer.root.remove(flight.mesh); flight.mesh.geometry.dispose();
-      (flight.mesh.material as THREE.Material).dispose(); this.flights.splice(i, 1);
+      this.renderer.root.remove(flight.mesh); disposeObject(flight.mesh); this.flights.splice(i, 1);
     }
   }
 
@@ -738,17 +772,24 @@ export class Game {
     const pot = new THREE.Group();
     pot.name = 'borshch-pot';
     pot.position.set(config.yard.potPosition[0], config.yard.potPosition[1], config.yard.potPosition[2]);
-    const potBody = new THREE.Mesh(new THREE.CylinderGeometry(0.54, 0.43, 0.63, 8), this.renderer.toon('#c75e42'));
-    potBody.castShadow = true;
-    pot.add(potBody);
-    const rim = new THREE.Mesh(new THREE.TorusGeometry(0.53, 0.07, 5, 10), this.renderer.toon('#e48a4c'));
-    rim.rotation.x = Math.PI / 2;
-    rim.position.y = 0.32;
-    pot.add(rim);
-    const soup = new THREE.Mesh(new THREE.CircleGeometry(0.46, 10), this.renderer.toon('#a94835'));
-    soup.rotation.x = -Math.PI / 2;
-    soup.position.y = 0.29;
-    pot.add(soup);
+    const potModel = cloneModel('pot');
+    if (potModel) {
+      pot.add(potModel);
+      scene.userData.addOutlined(modelPart(potModel, 'body') as THREE.Mesh);
+    } else {
+      const potBody = new THREE.Mesh(new THREE.CylinderGeometry(0.54, 0.43, 0.63, 8), this.renderer.toon('#c75e42'));
+      potBody.castShadow = true;
+      pot.add(potBody);
+      const rim = new THREE.Mesh(new THREE.TorusGeometry(0.53, 0.07, 5, 10), this.renderer.toon('#e48a4c'));
+      rim.rotation.x = Math.PI / 2;
+      rim.position.y = 0.32;
+      pot.add(rim);
+      const soup = new THREE.Mesh(new THREE.CircleGeometry(0.46, 10), this.renderer.toon('#a94835'));
+      soup.rotation.x = -Math.PI / 2;
+      soup.position.y = 0.29;
+      pot.add(soup);
+      scene.userData.addOutlined(potBody);
+    }
     root.add(pot);
     const sprigMaterial = this.renderer.toon('#668c4f');
     for (let i = 0; i < 7; i += 1) {
@@ -761,13 +802,12 @@ export class Game {
       root.add(stem);
     }
     scene.userData.addOutlined(ground);
-    scene.userData.addOutlined(potBody);
   }
 
   private createLandPlatforms(): void {
     for (const slot of getLandSlots()) {
       const size = getLandSize(Number(slot.id.split('-')[1]));
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(size, 0.62, size), this.renderer.toon('#80644b'));
+      const mesh = this.createLandMesh(size);
       mesh.name = `land-${slot.id}`; mesh.position.set(slot.x, slot.y - 0.31, slot.z); mesh.rotation.y = slot.rotation;
       mesh.receiveShadow = true; mesh.visible = useGameStore.getState().destroyedBases.includes(slot.id);
       this.landPlatforms.set(slot.id, mesh); this.renderer.root.add(mesh);
@@ -779,7 +819,7 @@ export class Game {
         const destroyed = state.destroyedBases.includes(id);
         mesh.visible = destroyed || index === 1 || state.destroyedBases.includes(`${side}-${index - 1}`);
         mesh.userData.owner = destroyed ? 'land' : 'enemy';
-        (mesh.material as THREE.MeshToonMaterial).color.set(destroyed ? '#84a567' : '#80644b');
+        ((mesh.userData.topMaterial ?? mesh.material) as THREE.MeshToonMaterial).color.set(destroyed ? '#84a567' : '#80644b');
       }
     };
     update();
@@ -789,7 +829,7 @@ export class Game {
       for (let i = 0; i < chain.length; i += 1) {
         const a = i === 0 ? getIslandLayout(side) : chain[i - 1]!;
         const b = chain[i]!;
-        const bridge = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.18, Math.hypot(b.x - a.x, b.z - a.z)), this.renderer.toon('#a9794f'));
+        const bridge = this.createBridge(Math.hypot(b.x - a.x, b.z - a.z));
         bridge.name = `bridge-${side}-${i}`;
         bridge.position.set((a.x + b.x) / 2, b.y - 0.09, (a.z + b.z) / 2);
         bridge.rotation.y = Math.atan2(b.x - a.x, b.z - a.z);
@@ -799,6 +839,31 @@ export class Game {
         updateBridge(); useGameStore.subscribe(updateBridge);
       }
     }
+  }
+
+  /** Floating grass-topped island scaled to the slot; the grass material is private so it can recolour. */
+  private createLandMesh(size: number): THREE.Mesh {
+    const model = cloneModel('land', { land_top: '#80644b' });
+    const mesh = model ? modelPart(model, 'mesh') as THREE.Mesh | undefined : undefined;
+    if (!mesh) return new THREE.Mesh(new THREE.BoxGeometry(size, 0.62, size), this.renderer.toon('#80644b'));
+    mesh.removeFromParent();
+    mesh.scale.set(size, 1, size);
+    mesh.userData.topMaterial = (mesh.material as THREE.Material[]).find((material) => material.name === 'land_top');
+    return mesh;
+  }
+
+  /** Plank walkway laid along local +Z, centred on the origin like the old box bridge. */
+  private createBridge(length: number): THREE.Object3D {
+    if (!cloneModel('bridge_plank')) return new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.18, length), this.renderer.toon('#a9794f'));
+    const bridge = new THREE.Group();
+    const count = Math.max(1, Math.round(length / 0.24));
+    for (let i = 0; i < count; i += 1) {
+      const plank = cloneModel('bridge_plank')!;
+      plank.position.set(0, 0.09, (i + 0.5) * length / count - length / 2);
+      plank.rotation.y = (i % 3 - 1) * 0.04;
+      bridge.add(plank);
+    }
+    return bridge;
   }
 
   private createLandDecorations(): void {
@@ -817,6 +882,8 @@ export class Game {
         tree.name = `tree-${index}`;
         tree.position.set(x, 0, z);
         decoration.add(tree);
+        const model = cloneModel('tree_round');
+        if (model) { model.scale.setScalar(1 + index * 0.12); tree.add(model); return; }
         const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.05, 0.45, 5), trunkMaterial);
         stem.position.set(0, 0.22, 0);
         stem.castShadow = true;
@@ -827,10 +894,12 @@ export class Game {
         tree.add(crown);
       });
       for (let index = 0; index < 5; index += 1) {
-        const flower = new THREE.Mesh(new THREE.SphereGeometry(0.06, 5, 4), flowerMaterials[index % flowerMaterials.length]);
+        const petal = flowerMaterials[index % flowerMaterials.length]!.color;
+        const flowerModel = cloneModel('flower', { petal });
+        const flower = flowerModel ?? new THREE.Mesh(new THREE.SphereGeometry(0.06, 5, 4), flowerMaterials[index % flowerMaterials.length]);
         const angle = index * Math.PI * 2 / 5;
         flower.name = `flower-${index}`;
-        flower.position.set(Math.cos(angle) * 0.9, 0.07, Math.sin(angle) * 0.9);
+        flower.position.set(Math.cos(angle) * 0.9, flowerModel ? 0 : 0.07, Math.sin(angle) * 0.9);
         decoration.add(flower);
       }
       for (const p of useGameStore.getState().decorationPositions.filter((p) => p.landId === base.id)) {
@@ -862,6 +931,15 @@ export class Game {
       const plant = new THREE.Group();
       const angle = i * Math.PI * 2 / count;
       plant.position.set(Math.cos(angle) * tileSize * 0.27, getFieldTileTopY(), Math.sin(angle) * tileSize * 0.27);
+      const model = cloneModel('cotton_plant');
+      if (model) {
+        model.rotation.y = angle;
+        plant.add(model);
+        plant.userData.boll = modelPart(model, 'boll');
+        plants.push(plant);
+        garden.add(plant);
+        continue;
+      }
       const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.028, 0.28, 5), stemMaterial);
       stem.position.y = 0.14;
       plant.add(stem);

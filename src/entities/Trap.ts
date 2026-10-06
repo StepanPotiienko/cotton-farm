@@ -4,6 +4,7 @@ import type { EventBus, GameEvents } from '../core/Events';
 import type RAPIER from '@dimforge/rapier3d-compat';
 import { useGameStore } from '../state/store';
 import config from '../state/config/game.json';
+import { cloneModel, modelPart } from '../core/Models';
 
 export interface TrapConfig {
   id: string;
@@ -123,6 +124,16 @@ export class RakeTrap extends Trap {
 
   private buildRake(): THREE.Group {
     const g = new THREE.Group();
+    const model = cloneModel('rake');
+    if (model) {
+      // Only the handle flips; the floor plate stays put.
+      g.add(modelPart(model, 'handle')!);
+      const base = modelPart(model, 'base')!;
+      base.position.y = 0.04;
+      this.group.add(base);
+      g.position.y = 0.04;
+      return g;
+    }
     // Handle
     const handleGeo = new THREE.CylinderGeometry(0.035, 0.045, 0.9, 6);
     const wood = this.rendererToon('#8f5e42');
@@ -194,6 +205,8 @@ export class HaystackLauncher extends Trap {
   }
 
   private buildPlate(): THREE.Group {
+    const model = cloneModel('haystack_plate');
+    if (model) return model;
     const g = new THREE.Group();
     const wood = this.rendererToon('#8f5e42');
     const platform = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.04, 0.56), wood);
@@ -213,6 +226,8 @@ export class HaystackLauncher extends Trap {
   }
 
   private buildHaystack(): THREE.Group {
+    const model = cloneModel('haystack');
+    if (model) return model;
     const g = new THREE.Group();
     const hay = this.rendererToon('#d9a83f');
     const base = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.45, 0.3, 7), hay);
@@ -287,6 +302,8 @@ export class FryingPanTrap extends Trap {
   }
 
   private buildArm(): THREE.Group {
+    const model = cloneModel('pan_arm');
+    if (model) return model;
     const g = new THREE.Group();
     const post = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 1.1, 5), this.rendererToon('#5a4a3a'));
     post.position.y = 0.55;
@@ -302,8 +319,9 @@ export class FryingPanTrap extends Trap {
 
   private panMat = this.rendererToon('#2f2f2f');
   private buildPan(): THREE.Group {
-    const g = new THREE.Group();
+    const g = cloneModel('pan') ?? new THREE.Group();
     g.position.set(0.7, 1.05, 0);
+    if (g.children.length) return g;
     const pan = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.2, 0.04, 10), this.panMat);
     pan.rotation.x = Math.PI / 2;
     pan.castShadow = true;
@@ -325,9 +343,17 @@ export class FryingPanTrap extends Trap {
 }
 
 export class AirDefenceTrap extends Trap {
-  private readonly radar: THREE.Mesh;
+  private readonly radar: THREE.Object3D;
   constructor(events: EventBus<GameEvents>, entry: TrapConfig = trapConfigMap.get('air-defence')!) {
     super(events, entry);
+    const mastModel = cloneModel('air_defence_mast');
+    const radarModel = cloneModel('air_defence_radar');
+    if (mastModel && radarModel) {
+      this.radar = radarModel;
+      this.radar.position.y = 1.2;
+      this.group.add(mastModel, this.radar);
+      return;
+    }
     const material = new THREE.MeshToonMaterial({ color: '#75b4cf' });
     const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.15, 1.1, 6), material);
     mast.position.y = 0.55;

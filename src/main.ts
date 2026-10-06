@@ -5,6 +5,7 @@ import { mountHud } from './ui/hud';
 import { AudioManager } from './audio/AudioManager';
 import { loadGame, restoreGame, saveGame } from './core/Save';
 import { useGameStore } from './state/store';
+import { loadModels } from './core/Models';
 
 const app = document.querySelector<HTMLElement>('#app');
 const hud = document.querySelector<HTMLElement>('#hud');
@@ -19,11 +20,16 @@ useGameStore.subscribe(() => {
   }, 500);
 });
 window.addEventListener('pagehide', () => { try { saveGame(); } catch { /* Local storage can be unavailable. */ } });
-const audio = new AudioManager();
-const game = new Game(app, 1337);
-audio.bindEvents(game.events);
-mountHud(hud, () => audio.toggle(), game.events);
-void game.start();
 declare global { interface Window { __game: Game; __gameControls: GameControls } }
-window.__game = game;
-window.__gameControls = new GameControls(game);
+async function boot(): Promise<void> {
+  // Without the GLB the game falls back to its primitive meshes.
+  try { await loadModels(); } catch (error) { console.warn('Model load failed; using primitive meshes', error); }
+  const audio = new AudioManager();
+  const game = new Game(app!, 1337);
+  audio.bindEvents(game.events);
+  mountHud(hud!, () => audio.toggle(), game.events);
+  void game.start();
+  window.__game = game;
+  window.__gameControls = new GameControls(game);
+}
+void boot();
